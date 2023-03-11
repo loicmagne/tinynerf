@@ -104,9 +104,8 @@ class NerfData:
 
     def generate_rays(self):
         rays_d, rays_o = [], []
-        for i, c in enumerate(self.cameras):
+        for i, camera in enumerate(self.cameras):
             intrinsic = self.intrinsics[i] if isinstance(self.intrinsics, List) else self.intrinsics
-            camera = self.cameras[i]
             # Generate ray directions
             center = torch.tensor([intrinsic.cx, intrinsic.cy], dtype=torch.float)
             focal = torch.tensor([intrinsic.fx, intrinsic.fy], dtype=torch.float)
