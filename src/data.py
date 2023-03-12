@@ -26,54 +26,6 @@ from typing import List, Optional, cast
 from pathlib import Path
 from PIL import Image
 
-class NerfDataset(Dataset):
-    def __init__(self, data: NerfData):
-        self.rays_o: torch.Tensor # [n_rays, 3]
-        self.rays_d: torch.Tensor # [n_rays, 3]
-        self.rgbs: torch.Tensor | None # [n_rays, 3], None when doing novel view synthesis
-        self.indices: torch.Tensor # [n_rays, 1] index of the image the ray belongs to
-        self.cameras: List[torch.Tensor] # [n_images, 4, 4] camera matrices
-        self.shape: torch.Tensor
-
-        self.load_and_transform(data)
-
-    def load_and_transform(self, data: NerfData):
-        self.rays_o, self.rays_d = data.generate_rays()
-        self.indices = torch.repeat_interleave(torch.arange(data.n_img), torch.prod(data.shape,-1)).short()
-        self.shape = data.shape
-
-        if data.img_paths is not None:
-            imgs = []
-            for path in data.img_paths:
-                with Image.open(path) as img:
-                    if img.mode == "RGBA":
-                        bg = Image.new('RGBA', img.size, (255, 255, 255))
-                        img = Image.alpha_composite(bg, img).convert('RGB')
-                    torch_img = torch.from_numpy(np.array(img)) # TODO : copy? dtype=?
-                    imgs.append(torch_img)
-            self.rgbs = torch.cat([t.view(-1, 3) for t in imgs])
-
-    def recover_images(self, rgbs: torch.Tensor, indices: torch.Tensor | None = None) -> List[torch.Tensor]:
-        """ Reshape a list of (rgb, camera index) into a list of images """
-        if indices is None:
-            indices = self.indices
-        imgs = [rgbs[indices==idx].view(self.shape[idx].tolist()) for idx in torch.unique(indices)]
-        return imgs
-
-    def __len__(self):
-        return self.indices.size(0)
-
-    def __getitem__(self, idx):
-        data = {
-            "rays_o": self.rays_o[idx],
-            "rays_d": self.rays_d[idx],
-            "indices": self.indices[idx]
-        }
-        if self.rgbs is not None:
-            data = self.rgbs[idx],
-        return data
-
-
 @dataclass
 class Intrinsics:
     fx: float; fy: float; cx: float; cy: float; w: int; h: int
@@ -122,11 +74,60 @@ class NerfData:
             o = torch.zeros_like(d) + camera[:3, 3]
 
             # TODO: set rays origin to the near plane instead of camera origin
+            # TODO: normalize?
             
             rays_d.append(d)
             rays_o.append(o)
         rays_d, rays_o = torch.cat(rays_d), torch.cat(rays_o)
         return rays_d, rays_o
+
+class NerfDataset(Dataset):
+    def __init__(self, data: NerfData):
+        self.rays_o: torch.Tensor # [n_rays, 3]
+        self.rays_d: torch.Tensor # [n_rays, 3]
+        self.rgbs: torch.Tensor | None # [n_rays, 3], None when doing novel view synthesis
+        self.indices: torch.Tensor # [n_rays, 1] index of the image the ray belongs to
+        self.cameras: List[torch.Tensor] # [n_images, 4, 4] camera matrices
+        self.shape: torch.Tensor
+
+        self.load_and_transform(data)
+
+    def load_and_transform(self, data: NerfData):
+        self.rays_o, self.rays_d = data.generate_rays()
+        self.indices = torch.repeat_interleave(torch.arange(data.n_img), torch.prod(data.shape,-1)).short()
+        self.shape = data.shape
+
+        if data.img_paths is not None:
+            imgs = []
+            for path in data.img_paths:
+                with Image.open(path) as img:
+                    if img.mode == "RGBA":
+                        bg = Image.new('RGBA', img.size, (255, 255, 255))
+                        img = Image.alpha_composite(bg, img).convert('RGB')
+                    torch_img = torch.from_numpy(np.array(img, dtype=np.single)) # TODO : copy?
+                    torch_img /= torch_img.max()
+                    imgs.append(torch_img)
+            self.rgbs = torch.cat([t.view(-1, 3) for t in imgs])
+
+    def recover_images(self, rgbs: torch.Tensor, indices: torch.Tensor | None = None) -> List[torch.Tensor]:
+        """ Reshape a list of (rgb, camera index) into a list of images """
+        if indices is None:
+            indices = self.indices
+        imgs = [rgbs[indices==idx].view(self.shape[idx].tolist()) for idx in torch.unique(indices)]
+        return imgs
+
+    def __len__(self):
+        return self.indices.size(0)
+
+    def __getitem__(self, idx):
+        data = {
+            "rays_o": self.rays_o[idx],
+            "rays_d": self.rays_d[idx],
+            "indices": self.indices[idx]
+        }
+        if self.rgbs is not None:
+            data = self.rgbs[idx],
+        return data
 
 def parse_nerf_synthetic(scene_path: Path, split: str = "train") -> NerfData:
     with open(scene_path / f"transforms_{split}.json") as f_in:
