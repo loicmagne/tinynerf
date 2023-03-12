@@ -30,7 +30,7 @@ class NerfDataset(Dataset):
     def __init__(self, data: NerfData):
         self.rays_o: torch.Tensor # [n_rays, 3]
         self.rays_d: torch.Tensor # [n_rays, 3]
-        self.rgbs: torch.Tensor | None # [n_rays, 3]
+        self.rgbs: torch.Tensor | None # [n_rays, 3], None when doing novel view synthesis
         self.indices: torch.Tensor # [n_rays, 1] index of the image the ray belongs to
         self.cameras: List[torch.Tensor] # [n_images, 4, 4] camera matrices
         self.shape: torch.Tensor
@@ -46,9 +46,12 @@ class NerfDataset(Dataset):
             imgs = []
             for path in data.img_paths:
                 with Image.open(path) as img:
+                    if img.mode == "RGBA":
+                        bg = Image.new('RGBA', img.size, (255, 255, 255))
+                        img = Image.alpha_composite(bg, img).convert('RGB')
                     torch_img = torch.from_numpy(np.array(img)) # TODO : copy? dtype=?
                     imgs.append(torch_img)
-            self.rgbs = torch.cat([t.flatten() for t in imgs])
+            self.rgbs = torch.cat([t.view(-1, 3) for t in imgs])
 
     def recover_images(self, rgbs: torch.Tensor, indices: torch.Tensor | None = None) -> List[torch.Tensor]:
         """ Reshape a list of (rgb, camera index) into a list of images """
