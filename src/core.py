@@ -67,7 +67,7 @@ class OccupancyGrid(torch.nn.Module):
         self.grid = torch.zeros(size, dtype=torch.bool)
         self.size = torch.tensor(self.grid.size())
         self.stride = torch.tensor(self.grid.stride())
-        self.indices = torch.arange(self.n_voxels)
+        self.indices = torch.arange(self.n_voxels, dtype=torch.float)
 
     def indices_to_coordinates(self, indices: torch.Tensor) -> torch.Tensor :
         """Turn indices (shape [n]) in range [0, n_voxels] to 3D coordinates (shape [n,3]) in the grid"""
@@ -78,9 +78,9 @@ class OccupancyGrid(torch.nn.Module):
         return coords @ self.stride
 
     @torch.no_grad()
-    def update(self, occupancy_fn: Callable[[torch.Tensor], torch.Tensor], threshold: int):
+    def update(self, occupancy_fn: Callable[[torch.Tensor], torch.Tensor], threshold: float):
         coords = self.indices_to_coordinates(self.indices)
-        coords = (coords + 0.5 + torch.randn_like(coords)) / self.size # jitter to sample different points
+        coords = (coords + 0.5 + torch.randn_like(coords)) / self.size # jitter to sample different points, TODO: change to uniform
         self.grid = (occupancy_fn(coords) > threshold).view(self.grid.shape)
 
     def forward(self, coords: torch.Tensor):
