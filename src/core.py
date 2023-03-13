@@ -64,6 +64,7 @@ class OccupancyGrid(torch.nn.Module):
         coords = (self.coords + 0.5 + torch.randn_like(self.coords)) / self.size # jitter to sample different points, TODO: change to uniform
         self.grid = (occupancy_fn(coords) > threshold).view(self.grid.shape).float() # TODO: batch evaluation
 
+    @torch.no_grad()
     def forward(self, coords: torch.Tensor) -> torch.Tensor:
         """"coords: [n, 3], normalized [-1,1] coordinates"""
         values = torch.nn.functional.grid_sample(
