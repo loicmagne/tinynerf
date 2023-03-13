@@ -1,4 +1,4 @@
-"""
+""" TODO: remove
 si on décompose l'implémentation en étapes on a:
     - interface pour les datasets qui permet d'accéder aux samples/images/positions
     - boucle d'entrainement classique du ML train/test en itérant sur les rayons et en appelant une fonction render
@@ -37,52 +37,39 @@ from typing import Callable, List
 import torch
 import math
 
-# https://github.com/sarafridov/K-Planes/blob/main/plenoxels/ops/interpolation.py
-def sample_grid(grid: torch.Tensor, coords: torch.Tensor, align_corners: bool = True) -> torch.Tensor:
-    grid_dim = coords.shape[-1]
-
-    if grid.dim() == grid_dim + 1:
-        # no batch dimension present, need to add it
-        grid = grid.unsqueeze(0)
-    if coords.dim() == 2:
-        coords = coords.unsqueeze(0)
-
-    if grid_dim != 2 and grid_dim != 3:
-        raise NotImplementedError(f"sample_grid was called with {grid_dim}D data but is only implemented for 2D and 3D data.")
-
-    coords = coords.view([coords.shape[0]] + [1] * (grid_dim - 1) + list(coords.shape[1:]))
-    B, feature_dim = grid.shape[:2]
-    n = coords.shape[-2]
-    interp = torch.nn.functional.grid_sample(grid, coords, align_corners=align_corners, mode='bilinear', padding_mode='border')
-    interp = interp.view(B, feature_dim, n).transpose(-1, -2)  # [B, n, feature_dim]
-    interp = interp.squeeze()  # [B?, n, feature_dim?]
-    return interp
-
+# TODO : should occupancy grid accept normalized [0,1] coordinates 
+# or should it handle contraction itself ?
 class OccupancyGrid(torch.nn.Module):
     def __init__(self, size: List[int] | int):
         super().__init__()
         size = size if isinstance(size, List) else [size, size, size]
         self.n_voxels = math.prod(size)
     
-        self.grid = torch.zeros(size, dtype=torch.bool)
+        self.grid = torch.zeros(size, dtype=torch.float)
         self.size = torch.tensor(self.grid.size())
         self.stride = torch.tensor(self.grid.stride())
-        self.indices = torch.arange(self.n_voxels, dtype=torch.float)
+        self.coords = torch.stack(torch.meshgrid([
+            torch.arange(size[0], dtype=torch.float),
+            torch.arange(size[1], dtype=torch.float),
+            torch.arange(size[2], dtype=torch.float)
+        ], indexing="ij"), -1).view(-1, 3)
 
+    # TODO : delete?
     def indices_to_coordinates(self, indices: torch.Tensor) -> torch.Tensor :
         """Turn indices (shape [n]) in range [0, n_voxels] to 3D coordinates (shape [n,3]) in the grid"""
         return torch.remainder(indices.unsqueeze(1) - self.stride, self.size)
-    
-    def coordinates_to_indices(self, coords: torch.Tensor) -> torch.Tensor:
-        """Turn coordinates (shape [n, 3]) in the grid to 1D index (shape [n]) in [0, n_voxels]"""
-        return coords @ self.stride
 
     @torch.no_grad()
     def update(self, occupancy_fn: Callable[[torch.Tensor], torch.Tensor], threshold: float):
-        coords = self.indices_to_coordinates(self.indices)
-        coords = (coords + 0.5 + torch.randn_like(coords)) / self.size # jitter to sample different points, TODO: change to uniform
-        self.grid = (occupancy_fn(coords) > threshold).view(self.grid.shape)
+        coords = (self.coords + 0.5 + torch.randn_like(self.coords)) / self.size # jitter to sample different points, TODO: change to uniform
+        self.grid = (occupancy_fn(coords) > threshold).view(self.grid.shape).float() # TODO: batch evaluation
 
-    def forward(self, coords: torch.Tensor):
-        """"coords: [n, 3], normalized [0,1] coordinates"""
-        pass
+    def forward(self, coords: torch.Tensor) -> torch.Tensor:
+        """"coords: [n, 3], normalized [-1,1] coordinates"""
+        values = torch.nn.functional.grid_sample(
+            # self.grid[None,None,...]
+            self.grid.unsqueeze(0).unsqueeze(0),
+            coords.view(1,-1,1,1,3),
+            mode="bilinear", align_corners=False # TODO: align_corners=True?
+        ).view(-1)
+        return values
