@@ -113,7 +113,7 @@ class NerfDataset(Dataset):
         """ Reshape a list of (rgb, camera index) into a list of images """
         if indices is None:
             indices = self.indices
-        imgs = [rgbs[indices==idx].view(self.shape[idx].tolist()) for idx in torch.unique(indices)]
+        imgs = [rgbs[indices==idx].view([3, *self.shape[idx].tolist()]) for idx in torch.unique(indices)]
         return imgs
 
     def __len__(self):
@@ -126,7 +126,7 @@ class NerfDataset(Dataset):
             "indices": self.indices[idx]
         }
         if self.rgbs is not None:
-            data = self.rgbs[idx],
+            data["rgbs"] = self.rgbs[idx]
         return data
 
 def parse_nerf_synthetic(scene_path: Path, split: str = "train") -> NerfData:
