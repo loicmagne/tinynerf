@@ -33,27 +33,23 @@ class OccupancyGrid(torch.nn.Module):
         size = size if isinstance(size, List) else [size, size, size]
         self.n_voxels = math.prod(size)
     
-        self.grid = torch.zeros(size, dtype=torch.float, requires_grad=False)
-        self.size = torch.tensor(self.grid.size(), requires_grad=False)
-        self.stride = torch.tensor(self.grid.stride(), requires_grad=False)
+        self.grid: torch.Tensor
+        self.register_buffer("grid", torch.zeros(size, dtype=torch.float))
         self.coords = torch.stack(torch.meshgrid([
             torch.arange(size[0], dtype=torch.float),
             torch.arange(size[1], dtype=torch.float),
             torch.arange(size[2], dtype=torch.float)
         ], indexing="ij"), -1).view(-1, 3)
-
-    # TODO : delete?
-    def indices_to_coordinates(self, indices: torch.Tensor) -> torch.Tensor :
-        """Turn indices (shape [n]) in range [0, n_voxels] to 3D coordinates (shape [n,3]) in the grid"""
-        return torch.remainder(indices.unsqueeze(1) - self.stride, self.size)
+        self.size = torch.tensor(size, dtype=torch.float)
 
     @torch.no_grad()
     def update(self, occupancy_fn: Callable[[torch.Tensor], torch.Tensor], threshold: float = 0.01):
-        coords = (self.coords + 0.5 + torch.randn_like(self.coords)) / self.size # jitter to sample different points, TODO: change to uniform
+        coords = (self.coords + torch.rand_like(self.coords)) / self.size # jitter inside voxel 
+        coords = coords.to(self.grid.device)
         self.grid = (occupancy_fn(coords) > threshold).view(self.grid.shape).float() # TODO: batch evaluation
 
     @torch.no_grad()
-    def __call__(self, coords: torch.Tensor) -> torch.Tensor:
+    def forward(self, coords: torch.Tensor) -> torch.Tensor:
         """"coords: [..., 3], normalized [-1,1] coordinates"""
         values = torch.nn.functional.grid_sample(
             # self.grid[None,None,...]
@@ -145,7 +141,7 @@ class NerfRenderer(torch.nn.Module):
         # compute transmittance and alpha
         alpha = -samples_sigmas * distances[None, :] # not actually alpha
         transmittance = torch.exp(torch.cumsum(alpha, 1))[:, :-1]
-        transmittance = torch.cat([torch.ones(n,1), transmittance], dim=1) # shift transmittance to the right
+        transmittance = torch.cat([torch.ones(n,1).to(device), transmittance], dim=1) # shift transmittance to the right
         alpha = 1. - torch.exp(alpha)
         weights = transmittance * alpha
         

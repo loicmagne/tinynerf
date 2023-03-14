@@ -7,7 +7,7 @@ from src.data import parse_nerf_synthetic, NerfDataset
 def get_config() -> VanillaTrainConfig:
     parser = argparse.ArgumentParser(prog='tinynerf', description='Train nerf')
     
-    parser.add_argument('--epochs', type=int)
+    parser.add_argument('--steps', type=int)
     parser.add_argument('--batch_size', type=int)
     parser.add_argument('--eval_every', type=int)
     parser.add_argument('--train', type=str, required=True)
@@ -21,7 +21,7 @@ def get_config() -> VanillaTrainConfig:
     return VanillaTrainConfig(
         train_dataset,
         test_dataset,
-        args.epochs,
+        args.steps,
         args.batch_size,
         args.eval_every,
     )

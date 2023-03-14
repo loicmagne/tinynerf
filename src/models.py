@@ -8,7 +8,8 @@ from dataclasses import dataclass
 class PositionalEncoding(torch.nn.Module):
     def __init__(self, n_freqs: int):
         super().__init__()
-        self.freqs = 2**torch.arange(0, n_freqs) * torch.pi
+        self.freqs: torch.Tensor
+        self.register_buffer("freqs", 2**torch.arange(0, n_freqs) * torch.pi)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x[...,None] * self.freqs

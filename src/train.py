@@ -22,7 +22,7 @@ class EpochMetrics:
 class VanillaTrainConfig:
     train_dataset: NerfDataset
     test_dataset: NerfDataset | None
-    epochs: int
+    steps: int
     batch_size: int
     eval_every: int
 
@@ -37,8 +37,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
     rgb_decoder = VanillaColorDecoder(4, 256, [128])
     
     occupancy_fn = lambda t: sigma_decoder(feature_module(t))
-    occupancy_grid = OccupancyGrid(64)
-    occupancy_grid.update(occupancy_fn, 0.001)
+    occupancy_grid = OccupancyGrid(128)
 
     renderer = NerfRenderer(occupancy_grid, feature_module, sigma_decoder, rgb_decoder, mip360_contract).to(device)
     optimizer = torch.optim.Adam(renderer.parameters(), lr=3e-4)
@@ -46,34 +45,37 @@ def train_vanilla(cfg: VanillaTrainConfig):
     # TODO: DEVICES!!
     metrics : Dict[str, List]= { 'steps': [], 'epochs': [] }
 
+    epochs = cfg.steps // len(train_loader) + 1
     step = 0
-    for epoch in range(cfg.epochs):
+    for epoch in range(epochs):
         epoch_metrics = EpochMetrics()
 
         renderer.train()
-        for batch in train_loader:
-            step_metrics = StepMetrics()
+        with tqdm(train_loader) as loader:
+            for batch in loader:
+                step_metrics = StepMetrics()
 
-            rays_o = batch['rays_o'].to(device)
-            rays_d = batch['rays_d'].to(device)
-            rgbs = batch['rgbs'].to(device)
+                rays_o = batch['rays_o'].to(device)
+                rays_d = batch['rays_d'].to(device)
+                rgbs = batch['rgbs'].to(device)
 
-            if step < 256 or step % 16 == 0:
-                occupancy_grid.update(occupancy_fn, 0.01)
+                if step < 256 or step % 32 == 0:
+                    occupancy_grid.update(occupancy_fn, 0.01)
 
-            rendered_rgbs = renderer(rays_o, rays_d, 500, 1e-3, 1e10)
-            loss = torch.mean((rendered_rgbs - rgbs)**2)
-            
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+                rendered_rgbs = renderer(rays_o, rays_d, 500, 1e-3, 1e10)
+                loss = torch.mean((rendered_rgbs - rgbs)**2)
+ 
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-            train_loss = loss.detach().cpu().item()
-            step_metrics.loss = train_loss
-            epoch_metrics.train_loss += train_loss
-            metrics['steps'].append(step_metrics)
-            print(f"Step {step}: train loss {train_loss:.4f}")
-            step += 1
+                train_loss = loss.detach().cpu().item()
+                step_metrics.loss = train_loss
+                epoch_metrics.train_loss += train_loss
+
+                loader.set_postfix(loss=train_loss)
+                metrics['steps'].append(step_metrics)
+                step += 1
         
         if test_loader and epoch % cfg.eval_every == 0 and epoch > 0:
             renderer.eval()
