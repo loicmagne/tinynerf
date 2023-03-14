@@ -26,6 +26,7 @@ class VanillaFeatureMLP(torch.nn.Module):
                 torch.nn.Linear(hidden_features[k], hidden_features[k+1]),
             ) for k in range(len(hidden_features)-1)],
         )
+        self.feature_dim = hidden_features[-1]
 
     def forward(self, x):
         return self.net(x)
@@ -57,6 +58,6 @@ class VanillaColorDecoder(torch.nn.Module):
             torch.nn.Sigmoid(),
         )
     
-    def forward(self, x: torch.Tensor, features: torch.Tensor) -> torch.Tensor:
-        x = torch.cat([self.pe(x), features], -1)
+    def forward(self, features: torch.Tensor, rays_d: torch.Tensor) -> torch.Tensor:
+        x = torch.cat([self.pe(rays_d), features], -1)
         return self.net(x)
