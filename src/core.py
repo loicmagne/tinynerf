@@ -1,42 +1,5 @@
-""" TODO: remove
-si on décompose l'implémentation en étapes on a:
-    - interface pour les datasets qui permet d'accéder aux samples/images/positions
-    - boucle d'entrainement classique du ML train/test en itérant sur les rayons et en appelant une fonction render
-    - la logique de rendering NeRF, raymarching + accumulation
-    - contractions    
-    -> partie encore assez vague pour moi, la logique de space skipping / proposal sampling qui à l'air fondamental pour avoir un truc efficace, mais assez chiant à implémenter
-
-    - implémentation de la méthode en elle même tensorf kplanes etc.. donc simplement un moyen de passer des coordonnées à couleur/densité
-
-TODO:
-    - datasets loading / common interface (synthetic, mip nerf, etc.)
-    - typical DL training loop
-    - complete metric computation
-    - rendering logic: raymarching + accumulation
-    - density grid for space skipping, prposal sampling ?
-    - contractions
-    - kplanes actual implementation
-
-
-- comprendre le space skipping de tensorf/kplanes
-
-
-pour le space skipping, il y'a 2 méthodes:
-    - occupancy grid binaire qui stocke pour chaque voxel si un booléen qui vaut true si cet endroit en occupé. L'occupancy grid est ensuite utilisée dans le ray marching pour skip les voxels inutiles
-    - proposal network, un NN est utilisé pour estimer la densité sur un rayon, qui est ensuite utilisé itérativement pour raffiner l'estimation de la densité. À la fin on sample la densité sur le rayon pour obtenir les samples  
-
-la méthode proposal network a l'air plus simple à implémenter, au prix surement des performances, puisque ça rajoute un NN à évaluer. la méthode occupancy grid est surement plus chiante à implémenter, mais je dirais qu'elle est plus rapide + peut être accélérée sur gpu. la méthode proposal network alterne entre sampling et évaluation de NN donc je sais pas trop comment ça s'accélère avec CUDA
-
-pour les scenes contractions, globalement c'est simple, on travaille toujours avec des rayons dans les coordonnées du monde normal, et quand on a besoin de contracter (parce qu'on veut query une grid ou autre) on contracte.
-
-- comprendre le loading de datasets
-- checker le raymarching de jaxnerf
-
-
-
-
-
-we start with a bunch of rays of shape [n,3] for which we want to compute the color (i.e. sample along ray + accumulate)
+""" 
+we start with a bunch of rays directions and origin of shape [n,3] for which we want to compute the color (i.e. sample along ray + accumulate)
 
 ray marching is simply performed by creating a linspace of timestamps t and adding t * rays_direction to rays_origin
 this yields a 2D grid [n, n_samples, 3] for which we can query occupancy grid, and discard samples accordingly
@@ -52,7 +15,6 @@ finally we compute rgbs for remaining samples, and we can accumulate to compute 
 + we always operate on a fixed dimension vector/grid so this should work with triton
 - this process consumes more memory than it should, since we over generate samples, if we were to generate samples along ray iteratively, we could avoid
   allocating memory for samples which are discarded by the occupancy grid as done in nerfacc, but that is harder to work with triton
-
 """
 
 from typing import Callable, List, cast
@@ -100,7 +62,6 @@ class OccupancyGrid(torch.nn.Module):
             mode="bilinear", align_corners=False # TODO: align_corners=True?
         ).view(-1)
         return values
-
 
 def clamped_exponential_stepping(delta_min: float, delta_max: float, t_0: float, exp: float):
     """Exponential stepping function as described in Instant-NGP paper, which

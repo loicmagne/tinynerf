@@ -1,20 +1,8 @@
 """
 Data handling formats, with implementations for Synthetic-NeRF, Mip-NeRF-360, and custom images.
 All data are parsed into a common NerfData struct which is basically images+poses
-
---- idea buffer, TODO : REMOVE
-
-- There should be a common dataset format which takes as input a list of images with their poses and gives a standard nerf dataset API, i.e. which can provide rays, colors, images etc.
-- The issue is what should this Dataset class provide: the simple idea would be to only provide rendered rays of the form (origin, direction, pixel color) however doing so we lose the information about the original images, but we need those original images to compute some metrics, so it would be great to have a way to get back to the original images
-
-
-datasets:
-    - load every images and convert them to rays
-    - store 3 tensors : rays, rgbs, image_idx, + the list of cameras
-    - when sampling rays we just return rays and rgbs
-    - when sampling images 
-
 """
+
 from __future__ import annotations
 
 import numpy as np
