@@ -65,9 +65,8 @@ def mip360_contract(coords: torch.Tensor) -> torch.Tensor:
     norm = torch.norm(coords, float("inf"), -1, keepdim=True) # type: ignore 
     return torch.where(norm <= 1., coords, (2. - 1./norm) * coords / norm) / 2.
 
-class OccupancyGrid(torch.nn.Module):
+class OccupancyGrid():
     def __init__(self, size: List[int] | int):
-        super().__init__()
         size = size if isinstance(size, List) else [size, size, size]
         self.n_voxels = math.prod(size)
     
@@ -91,7 +90,7 @@ class OccupancyGrid(torch.nn.Module):
         self.grid = (occupancy_fn(coords) > threshold).view(self.grid.shape).float() # TODO: batch evaluation
 
     @torch.no_grad()
-    def forward(self, coords: torch.Tensor) -> torch.Tensor:
+    def __call__(self, coords: torch.Tensor) -> torch.Tensor:
         """"coords: [n, 3], normalized [-1,1] coordinates"""
         values = torch.nn.functional.grid_sample(
             # self.grid[None,None,...]
@@ -183,9 +182,8 @@ class NerfRenderer(torch.nn.Module):
         
         # compute transmittance and alpha
         alpha = -samples_sigmas * distances[None, :] # not actually alpha
-        transmittance = torch.exp(torch.cumsum(alpha, 1))
-        transmittance[:, 1:] = transmittance[:, :-1] # shift transmittance to the right
-        transmittance[:, 0] = 1.
+        transmittance = torch.exp(torch.cumsum(alpha, 1))[:, :-1]
+        transmittance = torch.cat([torch.ones(n,1), transmittance], dim=1) # shift transmittance to the right
         alpha = 1. - torch.exp(alpha)
         weights = transmittance * alpha
         
@@ -200,3 +198,6 @@ class NerfRenderer(torch.nn.Module):
         rendered_rgb = samples_rgbs.sum(1) # accumulate rgb
         
         return rendered_rgb
+
+def psnr(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    return - 10. * torch.log10(torch.mean((x - y) ** 2))
