@@ -1,5 +1,6 @@
 import torch
-from src.core import OccupancyGrid
+from src.core import OccupancyGrid, NerfRenderer, mip360_contract
+from src.models import VanillaFeatureMLP, VanillaOpacityDecoder, VanillaColorDecoder
 
 def test_occupancy_grid():
     grid = OccupancyGrid(128)
@@ -37,3 +38,28 @@ def test_occupancy_grid():
         assert grid.grid[c[2], c[1], c[0]] == o
     
     assert torch.all(grid(unit_coords) == torch.tensor(occs))
+    
+def test_renderer_vanilla_nerf():
+    # setup vanilla nerf
+    freqs_o = 2**torch.arange(0, 10) * torch.pi
+    freqs_d = 2**torch.arange(0, 4) * torch.pi
+    feature_mlp = VanillaFeatureMLP(freqs_o, [256 for k in range(8)])
+    opacity_decoder = VanillaOpacityDecoder(256)
+    color_decoder = VanillaColorDecoder(freqs_d, 256, [128])
+    
+    def occupancy_fn(t: torch.Tensor):
+        features = feature_mlp(t)
+        opacity = opacity_decoder(features)
+        return opacity
+
+    occupancy_grid = OccupancyGrid(128)
+    # TODO: occupancy_grid.update(occupancy_fn, 0.5)
+
+    renderer = NerfRenderer(occupancy_grid, feature_mlp, opacity_decoder, color_decoder, mip360_contract)
+
+    rays_o = torch.rand(100, 3)
+    rays_d = torch.rand(100, 3)
+    
+    rendered_rgb = renderer(rays_o, rays_d, 500, 1e-3, 1e10)
+    
+    assert rendered_rgb.size() == (100, 3)
