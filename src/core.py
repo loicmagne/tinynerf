@@ -63,17 +63,15 @@ import math
 def mip360_contract(coords: torch.Tensor) -> torch.Tensor:
     """Scene contraction from Mip-NeRF 360 https://arxiv.org/abs/2111.12077"""
     norm = torch.norm(coords, float("inf"), -1, keepdim=True) # type: ignore 
-    return torch.where(norm <= 1., coords, (2. - 1./norm) * coords / norm)
+    return torch.where(norm <= 1., coords, (2. - 1./norm) * coords / norm) / 2.
 
-# TODO : should occupancy grid accept normalized [0,1] coordinates 
-# or should it handle contraction itself ?
 class OccupancyGrid(torch.nn.Module):
     def __init__(self, size: List[int] | int):
         super().__init__()
         size = size if isinstance(size, List) else [size, size, size]
         self.n_voxels = math.prod(size)
     
-        self.grid = torch.ones(size, dtype=torch.float)
+        self.grid = torch.zeros(size, dtype=torch.float)
         self.size = torch.tensor(self.grid.size())
         self.stride = torch.tensor(self.grid.stride())
         self.coords = torch.stack(torch.meshgrid([
@@ -88,7 +86,7 @@ class OccupancyGrid(torch.nn.Module):
         return torch.remainder(indices.unsqueeze(1) - self.stride, self.size)
 
     @torch.no_grad()
-    def update(self, occupancy_fn: Callable[[torch.Tensor], torch.Tensor], threshold: float):
+    def update(self, occupancy_fn: Callable[[torch.Tensor], torch.Tensor], threshold: float = 0.01):
         coords = (self.coords + 0.5 + torch.randn_like(self.coords)) / self.size # jitter to sample different points, TODO: change to uniform
         self.grid = (occupancy_fn(coords) > threshold).view(self.grid.shape).float() # TODO: batch evaluation
 
@@ -151,7 +149,7 @@ class NerfRenderer(torch.nn.Module):
         n_samples: int, # number of samples along each ray
         near: float, # minimum distance along ray to sample
         far: float, # maximum distance along ray to sample
-        early_termination: float = 0.01 # early ray termination threshold
+        early_termination: float = 1e-4 # early ray termination threshold
     ) -> torch.Tensor:
         device = rays_o.device
         n = rays_o.shape[0]

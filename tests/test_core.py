@@ -39,6 +39,24 @@ def test_occupancy_grid():
     
     assert torch.all(grid(unit_coords) == torch.tensor(occs))
     
+def test_occupancy_grid_update():
+    # setup vanilla nerf
+    freqs_o = 2**torch.arange(0, 10) * torch.pi
+    feature_mlp = VanillaFeatureMLP(freqs_o, [256 for k in range(8)])
+    opacity_decoder = VanillaOpacityDecoder(256)
+
+    def occupancy_fn(t: torch.Tensor):
+        features = feature_mlp(t)
+        opacity = opacity_decoder(features)
+        return opacity
+
+    occupancy_grid = OccupancyGrid(32)
+    occupancy_grid.update(occupancy_fn, 0.)
+    assert occupancy_grid.grid.sum().item() == occupancy_grid.n_voxels
+
+    occupancy_grid.update(occupancy_fn, 0.5)
+    assert occupancy_grid.grid.sum().item() <= occupancy_grid.n_voxels
+
 def test_renderer_vanilla_nerf():
     # setup vanilla nerf
     freqs_o = 2**torch.arange(0, 10) * torch.pi
@@ -52,8 +70,8 @@ def test_renderer_vanilla_nerf():
         opacity = opacity_decoder(features)
         return opacity
 
-    occupancy_grid = OccupancyGrid(128)
-    # TODO: occupancy_grid.update(occupancy_fn, 0.5)
+    occupancy_grid = OccupancyGrid(64)
+    occupancy_grid.update(occupancy_fn, 0.001)
 
     renderer = NerfRenderer(occupancy_grid, feature_mlp, opacity_decoder, color_decoder, mip360_contract)
 
@@ -61,5 +79,5 @@ def test_renderer_vanilla_nerf():
     rays_d = torch.rand(100, 3)
     
     rendered_rgb = renderer(rays_o, rays_d, 500, 1e-3, 1e10)
-    
+
     assert rendered_rgb.size() == (100, 3)
