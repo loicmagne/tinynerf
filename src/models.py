@@ -5,9 +5,9 @@ from dataclasses import dataclass
 """Vanilla NeRF"""
 
 class PositionalEncoding(torch.nn.Module):
-    def __init__(self, freqs: torch.Tensor):
+    def __init__(self, n_freqs: int):
         super().__init__()
-        self.freqs = freqs
+        self.freqs = 2**torch.arange(0, n_freqs) * torch.pi
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x[...,None] * self.freqs
@@ -15,11 +15,11 @@ class PositionalEncoding(torch.nn.Module):
         return x.flatten(-2)
     
 class VanillaFeatureMLP(torch.nn.Module):
-    def __init__(self, freqs: torch.Tensor, hidden_features: List[int]):
+    def __init__(self, n_freqs: int, hidden_features: List[int]):
         super().__init__()
-        in_features = freqs.size(0) * 2 * 3
+        in_features = n_freqs * 2 * 3
         self.net = torch.nn.Sequential(
-            PositionalEncoding(freqs),
+            PositionalEncoding(n_freqs),
             torch.nn.Linear(in_features, hidden_features[0]),
             *[torch.nn.Sequential(
                 torch.nn.ReLU(),
@@ -43,10 +43,10 @@ class VanillaOpacityDecoder(torch.nn.Module):
         return self.net(x)
     
 class VanillaColorDecoder(torch.nn.Module):
-    def __init__(self, freqs: torch.Tensor, in_features: int, hidden_features: List[int]):
+    def __init__(self, n_freqs: int, in_features: int, hidden_features: List[int]):
         super().__init__()
-        self.pe = PositionalEncoding(freqs)
-        self.total_features = in_features + freqs.size(0) * 2 * 3
+        self.pe = PositionalEncoding(n_freqs)
+        self.total_features = in_features + n_freqs * 2 * 3
         self.net = torch.nn.Sequential(
             torch.nn.Linear(self.total_features, hidden_features[0]),
             *[torch.nn.Sequential(
