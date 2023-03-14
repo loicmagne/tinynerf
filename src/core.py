@@ -65,14 +65,15 @@ def mip360_contract(coords: torch.Tensor) -> torch.Tensor:
     norm = torch.norm(coords, float("inf"), -1, keepdim=True) # type: ignore 
     return torch.where(norm <= 1., coords, (2. - 1./norm) * coords / norm) / 2.
 
-class OccupancyGrid():
+class OccupancyGrid(torch.nn.Module):
     def __init__(self, size: List[int] | int):
+        super().__init__()
         size = size if isinstance(size, List) else [size, size, size]
         self.n_voxels = math.prod(size)
     
-        self.grid = torch.zeros(size, dtype=torch.float)
-        self.size = torch.tensor(self.grid.size())
-        self.stride = torch.tensor(self.grid.stride())
+        self.grid = torch.zeros(size, dtype=torch.float, requires_grad=False)
+        self.size = torch.tensor(self.grid.size(), requires_grad=False)
+        self.stride = torch.tensor(self.grid.stride(), requires_grad=False)
         self.coords = torch.stack(torch.meshgrid([
             torch.arange(size[0], dtype=torch.float),
             torch.arange(size[1], dtype=torch.float),
@@ -91,7 +92,7 @@ class OccupancyGrid():
 
     @torch.no_grad()
     def __call__(self, coords: torch.Tensor) -> torch.Tensor:
-        """"coords: [n, 3], normalized [-1,1] coordinates"""
+        """"coords: [..., 3], normalized [-1,1] coordinates"""
         values = torch.nn.functional.grid_sample(
             # self.grid[None,None,...]
             self.grid.unsqueeze(0).unsqueeze(0),
@@ -162,7 +163,7 @@ class NerfRenderer(torch.nn.Module):
         distances = t_values[1:] - t_values[:-1]
         t_values = t_values[:-1]
         n_samples -= 1
-        
+
         # jitter samples along ray when training
         if self.training:
             t_values = t_values + torch.rand_like(t_values) * distances

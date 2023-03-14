@@ -1,5 +1,6 @@
+import itertools
 import torch
-from typing import List
+from typing import List, Tuple, Callable
 from dataclasses import dataclass
 
 """Vanilla NeRF"""
@@ -39,6 +40,7 @@ class VanillaOpacityDecoder(torch.nn.Module):
             torch.nn.Sigmoid(),
         )
     
+    # TODO: activation function for density?
     def forward(self, x):
         return self.net(x)
     
@@ -61,3 +63,98 @@ class VanillaColorDecoder(torch.nn.Module):
     def forward(self, features: torch.Tensor, rays_d: torch.Tensor) -> torch.Tensor:
         x = torch.cat([self.pe(rays_d), features], -1)
         return self.net(x)
+    
+"""K-Planes https://arxiv.org/abs/2301.10241"""
+
+class KPlanesFeaturePlane(torch.nn.Module):
+    def __init__(
+        self,
+        feature_dim: int = 8,
+        resolution: Tuple[int, int] = (128, 128),
+        init: Callable = torch.nn.init.normal_
+    ):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.plane = torch.nn.Parameter(torch.empty(1, feature_dim, *resolution))
+        init(self.plane)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (..., 2)"""
+        new_shape = [*x.size()[:-1],self.feature_dim]
+        return torch.nn.functional.grid_sample(
+            self.plane,
+            x.view(1,-1,1,2),
+            mode='bilinear',
+            align_corners=False 
+        ).view(new_shape)
+
+class KPlanesFeatureField(torch.nn.Module):
+    def __init__(self, feature_dim: int = 32):
+        super().__init__()
+        self.planes = torch.nn.ModuleList([
+            torch.nn.ModuleList([
+                KPlanesFeaturePlane(feature_dim, resolution=(128,128)),
+                KPlanesFeaturePlane(feature_dim, resolution=(128,128)),
+                KPlanesFeaturePlane(feature_dim, resolution=(128,128)),
+            ]),
+            torch.nn.ModuleList([
+                KPlanesFeaturePlane(feature_dim, resolution=(256,256)),
+                KPlanesFeaturePlane(feature_dim, resolution=(256,256)),
+                KPlanesFeaturePlane(feature_dim, resolution=(256,256)),
+            ]),
+            torch.nn.ModuleList([
+                KPlanesFeaturePlane(feature_dim, resolution=(512,512)),
+                KPlanesFeaturePlane(feature_dim, resolution=(512,512)),
+                KPlanesFeaturePlane(feature_dim, resolution=(512,512)),
+            ])
+        ])
+        # pairs of coordinates that will be used to compute plane feature *in that order*
+        # check the order if you want to have specific resolution for a given dimension (e.g. t in the paper)
+        self.dimension_pairs = list(itertools.combinations(range(3), 2))
+        self.feature_dim = 32 * len(self.planes)
+
+        for plane_scale in self.planes:
+            assert isinstance(plane_scale, torch.nn.ModuleList)
+            assert len(plane_scale) == len(self.dimension_pairs)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (..., 3)
+        returns"""
+        
+        features = []
+        for plane_scale in self.planes:
+            current_scale_features = 1.
+            for (i, j), plane in zip(self.dimension_pairs, plane_scale): # type: ignore
+                current_scale_features *= plane(x[..., (i,j)])
+            features.append(current_scale_features)
+        return torch.cat(features, -1) # type: ignore
+
+class KPlanesExplicitOpacityDecoder(torch.nn.Module):
+    def __init__(self, feature_dim):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(feature_dim, feature_dim),
+        )
+        
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        x = torch.sum(features * self.net(features), -1, keepdim=True)
+        return torch.exp(x)
+    
+class KPlanesExplicitColorDecoder(torch.nn.Module):
+    def __init__(self, feature_dim, n_freqs = 4, hidden_dim = 128):
+        super().__init__()
+        self.pe = PositionalEncoding(4)
+        self.feature_dim = feature_dim
+        in_dim = feature_dim + n_freqs * 2 * 3
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(in_dim, hidden_dim),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.Linear(hidden_dim, 3 * feature_dim),
+        )
+
+    def forward(self, features: torch.Tensor, rays_d: torch.Tensor) -> torch.Tensor:
+        x = torch.cat([self.pe(rays_d), features], -1)
+        x = self.net(x).view(-1, 3, self.feature_dim)
+        output = torch.sum(features.unsqueeze(-2) * x, -1)
+        return torch.sigmoid(output)
