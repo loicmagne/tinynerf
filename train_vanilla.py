@@ -10,6 +10,7 @@ def get_config() -> VanillaTrainConfig:
     parser.add_argument('--steps', type=int)
     parser.add_argument('--batch_size', type=int)
     parser.add_argument('--eval_every', type=int)
+    parser.add_argument('--output', type=str, required=True)
     parser.add_argument('--train', type=str, required=True)
     parser.add_argument('--test', type=str, required=True)
 
@@ -21,6 +22,7 @@ def get_config() -> VanillaTrainConfig:
     return VanillaTrainConfig(
         train_dataset,
         test_dataset,
+        Path(args.output),
         args.steps,
         args.batch_size,
         args.eval_every,
