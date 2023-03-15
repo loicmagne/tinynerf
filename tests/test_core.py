@@ -1,5 +1,5 @@
 import torch
-from src.core import OccupancyGrid, NerfRenderer, mip360_contract
+from src.core import OccupancyGrid, NerfRenderer, mip360_contract, clipped_exponential_stepping
 from src.models import VanillaFeatureMLP, VanillaOpacityDecoder, VanillaColorDecoder
 
 def test_occupancy_grid():
@@ -70,11 +70,24 @@ def test_renderer_vanilla_nerf():
     occupancy_grid = OccupancyGrid(64)
     occupancy_grid.update(occupancy_fn, 0.001)
 
-    renderer = NerfRenderer(occupancy_grid, feature_mlp, opacity_decoder, color_decoder, mip360_contract)
+    renderer = NerfRenderer(
+        occupancy_grid,
+        feature_mlp,
+        opacity_decoder,
+        color_decoder,
+        mip360_contract
+    )
 
     rays_o = torch.rand(100, 3)
     rays_d = torch.rand(100, 3)
-    
-    rendered_rgb = renderer(rays_o, rays_d, 500, 1e-3, 1e10)
+
+    rendered_rgb = renderer(rays_o, rays_d)
 
     assert rendered_rgb.size() == (100, 3)
+
+def test_stepping():
+    t_values, distances = clipped_exponential_stepping(0., 1e5, 1e-3, 1e10, torch.device('cpu'))
+    assert torch.all(t_values[1:] > t_values[:-1])
+    assert torch.all(t_values <= 1e5)
+    assert torch.all(t_values >= 0.)
+    assert torch.all(t_values[:-1] + distances[:-1] == t_values[1:])

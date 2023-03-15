@@ -39,7 +39,15 @@ def train_vanilla(cfg: VanillaTrainConfig):
     occupancy_fn = lambda t: sigma_decoder(feature_module(t))
     occupancy_grid = OccupancyGrid(128)
 
-    renderer = NerfRenderer(occupancy_grid, feature_module, sigma_decoder, rgb_decoder, mip360_contract).to(device)
+    renderer = NerfRenderer(
+        occupancy_grid,
+        feature_module,
+        sigma_decoder,
+        rgb_decoder,
+        mip360_contract,
+        near=0.,
+        far=1e10,
+    ).to(device)
     optimizer = torch.optim.Adam(renderer.parameters(), lr=3e-4)
 
     # TODO: DEVICES!!
@@ -62,7 +70,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
                 if step < 256 or step % 32 == 0:
                     occupancy_grid.update(occupancy_fn, 0.01)
 
-                rendered_rgbs = renderer(rays_o, rays_d, 500, 1e-3, 1e10)
+                rendered_rgbs = renderer(rays_o, rays_d)
                 loss = torch.mean((rendered_rgbs - rgbs)**2)
  
                 optimizer.zero_grad()
@@ -87,7 +95,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
                     rgbs = batch['rgbs'].to(device)
                     indices = batch['indices']
 
-                    rendered_rgbs = renderer(rays_o, rays_d, 500, 1e-3, 1e10)
+                    rendered_rgbs = renderer(rays_o, rays_d)
                     loss = torch.mean((rendered_rgbs - rgbs)**2)
 
                     test_loss = loss.detach().cpu().item()

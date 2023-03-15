@@ -59,29 +59,18 @@ class OccupancyGrid(torch.nn.Module):
         ).view(-1)
         return values
 
-def clamped_exponential_stepping(delta_min: float, delta_max: float, t_0: float, exp: float):
-    """Exponential stepping function as described in Instant-NGP paper, which
-    is a regular exponential function but extended to a linear function after the derivative 
-    is greater than delta_max or before it is lower than delta_min"""
-    min_threshold = delta_min / np.log(t_0 * np.log(exp) * exp)
-    max_threshold = delta_max / np.log(t_0 * np.log(exp) * exp)
-    
-    alpha_min = delta_min
-    alpha_max = delta_max
-    beta_min = np.power(exp, min_threshold) * t_0 - alpha_min * min_threshold
-    beta_max = np.power(exp, max_threshold) * t_0 - alpha_max * max_threshold
-
-    def f(x: torch.Tensor):
-        return torch.where(
-            x < min_threshold,
-            alpha_min * x + beta_min,
-            torch.where(
-                x > max_threshold,
-                alpha_max * x + beta_max,
-                torch.exp(x * np.log(exp)) * t_0
-            )
-        )
-    return f
+def clipped_exponential_stepping(near: float, far: float, delta_min: float, delta_max: float, device: torch.device):
+    """Clipped exponential stepping function as described in Instant-NGP paper"""
+    t = near
+    acc_ts, acc_steps = [t], []
+    while t < far:
+        step = min(delta_max, max(delta_min, t))
+        t += step
+        acc_ts.append(t)
+        acc_steps.append(step)
+    ts = torch.tensor(acc_ts[:-1], device=device)
+    steps = torch.tensor(acc_steps, device=device)
+    return ts, steps
 
 class NerfRenderer(torch.nn.Module):
     def __init__(
@@ -90,7 +79,11 @@ class NerfRenderer(torch.nn.Module):
         feature_module: torch.nn.Module,
         sigma_decoder: torch.nn.Module,
         rgb_decoder: torch.nn.Module,
-        contraction: Callable[[torch.Tensor], torch.Tensor] = mip360_contract
+        contraction: Callable[[torch.Tensor], torch.Tensor] = mip360_contract,
+        near: float = 0.,
+        far: float = 1e5,
+        delta_min: float = math.sqrt(3.)/1024.,
+        delta_max: float = 1e10,
     ):
         super().__init__()
         self.occupancy_grid = occupancy_grid
@@ -98,41 +91,39 @@ class NerfRenderer(torch.nn.Module):
         self.sigma_decoder = sigma_decoder
         self.rgb_decoder = rgb_decoder
         self.contraction = contraction
+        self.near = near
+        self.far = far
+        self.delta_min = delta_min
+        self.delta_max = delta_max
+
+        assert hasattr(self.feature_module, "feature_dim"), "feature module requires a feature_dim attribute"
 
     def forward(
         self,
         rays_o: torch.Tensor, # [n, 3]
         rays_d: torch.Tensor, # [n, 3]
-        n_samples: int, # number of samples along each ray
-        near: float, # minimum distance along ray to sample
-        far: float, # maximum distance along ray to sample
         early_termination: float = 1e-4 # early ray termination threshold
     ) -> torch.Tensor:
         device = rays_o.device
-        n = rays_o.shape[0]
 
         # Generate samples along each ray
         # TODO : precompute and store t_values
-        t_close = torch.linspace(near, near+1, n_samples // 2, dtype=torch.float, device=device)
-        t_far  = torch.exp(torch.arange(n_samples // 2, dtype=torch.float, device=device) * np.log(1.+ 1./256.)) * (near + 1.)
-        t_values = torch.cat([t_close, t_far])
         # TODO: distances are wrong for now since they don't account for ray direction norm -> should normalize rays_d?
-        distances = t_values[1:] - t_values[:-1]
-        t_values = t_values[:-1]
-        n_samples -= 1
-
+        t_values, distances = clipped_exponential_stepping(self.near, self.far, self.delta_min, self.delta_max, device)
         # jitter samples along ray when training
         if self.training:
             t_values = t_values + torch.rand_like(t_values) * distances
 
+        n_rays = rays_o.size(0)
+        n_samples = t_values.size(0)
+
         samples_grid = rays_o[:, None, :] + rays_d[:, None, :] * t_values[None, :, None]
         samples_grid = self.contraction(samples_grid)
-        mask : torch.Tensor = self.occupancy_grid(samples_grid).view(n, n_samples).bool()
+        mask : torch.Tensor = self.occupancy_grid(samples_grid).view(n_rays, n_samples).bool()
 
-        assert hasattr(self.feature_module, "feature_dim"), "feature module requires a feature_dim attribute"
-        samples_features = torch.zeros(n, n_samples, cast(int, self.feature_module.feature_dim), device=device)
-        samples_sigmas = torch.zeros(n, n_samples, device=device)
-        samples_rgbs = torch.zeros(n, n_samples, 3, device=device)
+        samples_features = torch.zeros(n_rays, n_samples, cast(int, self.feature_module.feature_dim), device=device)
+        samples_sigmas = torch.zeros(n_rays, n_samples, device=device)
+        samples_rgbs = torch.zeros(n_rays, n_samples, 3, device=device)
 
         # compute features and density for remaining samples
         samples_features[mask] = self.feature_module(samples_grid[mask])
@@ -141,7 +132,7 @@ class NerfRenderer(torch.nn.Module):
         # compute transmittance and alpha
         alpha = -samples_sigmas * distances[None, :] # not actually alpha
         transmittance = torch.exp(torch.cumsum(alpha, 1))[:, :-1]
-        transmittance = torch.cat([torch.ones(n,1).to(device), transmittance], dim=1) # shift transmittance to the right
+        transmittance = torch.cat([torch.ones(n_rays,1).to(device), transmittance], dim=1) # shift transmittance to the right
         alpha = 1. - torch.exp(alpha)
         weights = transmittance * alpha
         
