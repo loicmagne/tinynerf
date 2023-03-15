@@ -1,4 +1,3 @@
-from src.data import NerfDataset
 from src.models import VanillaFeatureMLP, VanillaOpacityDecoder, VanillaColorDecoder
 from src.models import KPlanesFeatureField, KPlanesExplicitOpacityDecoder, KPlanesExplicitColorDecoder
 from src.core import OccupancyGrid, NerfRenderer, mip360_contract, psnr
@@ -8,6 +7,7 @@ from tqdm import tqdm
 from typing import List, Dict
 from PIL import Image
 from pathlib import Path
+from torch.utils.data import Dataset
 import json
 import torch
 import torch.amp as amp
@@ -25,20 +25,20 @@ class TestMetrics:
 
 @dataclass
 class VanillaTrainConfig:
-    train_dataset: NerfDataset
-    test_dataset: NerfDataset | None
+    train_dataset: Dataset
+    test_dataset: Dataset | None
     output: Path
     method: str
     steps: int
     batch_size: int
     eval_every: int
+    eval_n : int
     occupancy_res: int
 
 def train_vanilla(cfg: VanillaTrainConfig):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     train_loader = DataLoader(cfg.train_dataset, cfg.batch_size, shuffle=True)
-    test_loader = DataLoader(cfg.test_dataset, cfg.batch_size, shuffle=False) if cfg.test_dataset else None
 
     feature_module: torch.nn.Module
     sigma_decoder: torch.nn.Module
@@ -75,11 +75,12 @@ def train_vanilla(cfg: VanillaTrainConfig):
     def loop() -> tuple[list[TrainMetrics], list[TestMetrics]]: 
         train_metrics: List[TrainMetrics] = []
         test_metrics: List[TestMetrics] = []
-        step = 0
+        train_step = 0
+        test_step = 0
         with tqdm(total=cfg.steps) as pbar:
             while True:
                 for batch in train_loader:
-                    if step >= cfg.steps:
+                    if train_step >= cfg.steps:
                         return train_metrics, test_metrics
                     renderer.train()
 
@@ -88,7 +89,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
                     rgbs = batch['rgbs'].to(device)
 
                     with torch.autocast(device.type, enabled=device.type=='cuda'): # type: ignore
-                        if step < 256 or step % 32 == 0:
+                        if train_step % 32 == 0:
                             occupancy_grid.update(occupancy_fn, 0.01)
 
                         rendered_rgbs = renderer(rays_o, rays_d)
@@ -107,47 +108,43 @@ def train_vanilla(cfg: VanillaTrainConfig):
                     occupancy = occupancy_grid.grid.sum().item() / occupancy_grid.grid.numel()
                     train_metrics.append(TrainMetrics(train_loss, occupancy))
                     pbar.set_postfix(loss=train_loss, occupancy=occupancy)
-                
-                    if test_loader and cfg.test_dataset and step % cfg.eval_every == 0 and step > 0:
+
+                    if cfg.test_dataset and train_step % cfg.eval_every == 0 and train_step > 0:
                         renderer.eval()
                         with torch.no_grad():
-                            acc_rendered_rgbs, acc_rgbs, acc_indices = [], [], []
                             metrics = TestMetrics()
-                            for batch in test_loader:
-                                rays_o = batch['rays_o'].to(device)
-                                rays_d = batch['rays_d'].to(device)
-                                rgbs = batch['rgbs'].to(device)
-                                indices = batch['indices']
+                            for i in tqdm(range(cfg.eval_n)):
+                                data = cfg.test_dataset[test_step]
+                                img = data['rgbs']
+                                rays_o = data['rays_o'].view(-1, 3)
+                                rays_d = data['rays_d'].view(-1, 3)
+                                rgbs = data['rgbs'].view(-1, 3)
+                                rendered_rgbs = []
+                                img_loss = []
+                                for k in range(0, len(rays_o), cfg.batch_size):
+                                    batch_rays_o = rays_o[k:k+1024].to(device)
+                                    batch_rays_d = rays_d[k:k+1024].to(device)
+                                    batch_rgbs = rgbs[k:k+1024].to(device)
 
-                                rendered_rgbs = renderer(rays_o, rays_d)
-                                loss = torch.mean((rendered_rgbs - rgbs)**2)
+                                    batch_rendered_rgbs = renderer(batch_rays_o, batch_rays_d)
+                                    test_loss = torch.mean((batch_rendered_rgbs - batch_rgbs)**2).item()
 
-                                test_loss = loss.item()
-                                metrics.loss += test_loss
+                                    img_loss.append(test_loss)
+                                    rendered_rgbs.append(batch_rendered_rgbs.cpu())
+                                rendered_img = torch.cat(rendered_rgbs, dim=0).view(img.shape)
+                                metrics.psnr += psnr(img, rendered_img).item()
+                                metrics.loss += torch.mean(torch.tensor(img_loss)).item()
 
-                                acc_rendered_rgbs.append(rendered_rgbs.cpu())
-                                acc_rgbs.append(rgbs.cpu())
-                                acc_indices.append(indices.cpu())
+                                # Save image
+                                rendered_img = (255. * rendered_img.permute(1, 2, 0)).type(torch.uint8).numpy()
+                                Image.fromarray(img).save(cfg.output / f'{train_step}_{i}_test.png')
 
-                            original_images = cfg.test_dataset.recover_images(
-                                torch.cat(acc_rgbs, dim=0),
-                                torch.cat(acc_indices, dim=0)
-                            )
-                            rendered_images = cfg.test_dataset.recover_images(
-                                torch.cat(acc_rendered_rgbs, dim=0),
-                                torch.cat(acc_indices, dim=0)
-                            )
-
-                            psnrs = [psnr(original_images[i], rendered_images[i]) for i in range(len(original_images))]
-                            metrics.psnr = torch.mean(torch.tensor(psnrs)).item()
-                            metrics.loss /= len(test_loader)
+                                test_step += 1
+                            metrics.psnr /= cfg.eval_n
+                            metrics.loss /= cfg.eval_n
                             test_metrics.append(metrics)
- 
-                            for i, img in enumerate(rendered_images):
-                                img = (255. * img.permute(1, 2, 0)).type(torch.uint8).numpy()
-                                Image.fromarray(img).save(cfg.output / f'{step}_{i}_test.png')
 
-                    step += 1
+                    train_step += 1
                     pbar.update(1)
 
     train_metrics, test_metrics = loop()

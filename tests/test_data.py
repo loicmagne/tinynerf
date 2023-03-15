@@ -1,31 +1,27 @@
 from typing import cast
 from pathlib import Path
-from src.data import parse_nerf_synthetic, NerfDataset
+from src.data import parse_nerf_synthetic, RaysDataset, ImagesDataset
 from torch.utils.data import DataLoader
 import torch
 
 def test_synthetic_dataset():
     data = parse_nerf_synthetic(Path("tests/dummy/hotdog"), "train")
-    dataset = NerfDataset(data)
-    assert dataset.rays_d.size() == dataset.rays_o.size()
-    assert dataset.indices.size(0) == dataset.rays_d.size(0)
-    assert dataset.rgbs is not None and dataset.rgbs.size(0) == dataset.rays_d.size(0)
-    assert dataset.rgbs.min() >= 0. and dataset.rgbs.max() <= 1.
-    assert dataset.rgbs.dtype == torch.float
-    assert dataset.rays_d.dtype == torch.float
-    assert dataset.rays_o.dtype == torch.float
+    ray_dataset = RaysDataset(data)
+    img_dataset = ImagesDataset(data)
 
-    loader = DataLoader(dataset, batch_size=1024, shuffle=False)
-    rgbs, indices = [], []
+    assert len(img_dataset.rays_d) == len(img_dataset.rays_o)
+    assert img_dataset.rgbs is not None and len(img_dataset.rgbs) == len(img_dataset.rays_d)
+
+    assert ray_dataset.rays_d.size() == ray_dataset.rays_o.size()
+    assert ray_dataset.rgbs is not None and ray_dataset.rgbs.size(0) == ray_dataset.rays_d.size(0)
+    assert ray_dataset.rgbs.min() >= 0. and ray_dataset.rgbs.max() <= 1.
+    assert ray_dataset.rgbs.dtype == torch.float
+    assert ray_dataset.rays_d.dtype == torch.float
+    assert ray_dataset.rays_o.dtype == torch.float
+
+    loader = DataLoader(ray_dataset, batch_size=1024, shuffle=False)
+    rgbs = []
     for batch in loader:
         rgbs.append(batch['rgbs'])
-        indices.append(batch['indices'])
     rgbs = torch.cat(rgbs, dim=0)
-    indices = torch.cat(indices, dim=0)
-    reconstructed_imgs = dataset.recover_images(rgbs, indices)
-    assert rgbs.size(0) == dataset.rays_d.size(0)
-    assert len(reconstructed_imgs) == 2
-    assert reconstructed_imgs[0].size(1) == dataset.shape[0][0]
-    assert reconstructed_imgs[0].size(2) == dataset.shape[0][1]
-    assert reconstructed_imgs[1].size(1) == dataset.shape[1][0]
-    assert reconstructed_imgs[1].size(2) == dataset.shape[1][1]
+    assert rgbs.size(0) == ray_dataset.rays_d.size(0)

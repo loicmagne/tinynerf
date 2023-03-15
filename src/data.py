@@ -10,7 +10,7 @@ import json
 import torch
 from torch.utils.data import Dataset
 from dataclasses import dataclass
-from typing import List, Optional, cast
+from typing import Tuple, List, Optional
 from pathlib import Path
 from PIL import Image
 
@@ -26,9 +26,9 @@ class NerfData:
     intrinsics images, will see if it's ever useful
     """
     
-    cameras: List[torch.Tensor]
+    cameras: List[torch.Tensor] # [n_images, 4, 4] camera matrices
     intrinsics: Intrinsics | List[Intrinsics]
-    img_paths: Optional[List[Path]] = None
+    imgs: Optional[List[torch.Tensor]] = None # [n_images], [h, w, 3] list of RGB HWC [0,1] images
     
     @property
     def n_img(self):
@@ -45,8 +45,8 @@ class NerfData:
         # one line: shapes = torch.tensor([[K.w, K.h] for K in (self.intrinsics if isinstance(self.intrinsics, List) else [self.intrinsics for _ in range(n)])])
         return shapes
 
-    def generate_rays(self):
-        rays_d, rays_o = [], []
+    def generate_rays(self) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        rays_o, rays_d = [], []
         for i, camera in enumerate(self.cameras):
             intrinsic = self.intrinsics[i] if isinstance(self.intrinsics, List) else self.intrinsics
             # Generate ray directions
@@ -58,60 +58,46 @@ class NerfData:
             grid = torch.nn.functional.pad(grid, (0,1), 'constant', 1.) # pad with 1 to get 3d coordinated
 
             # Apply camera transformation
-            d = (grid @ camera[:3,:3].T).view(-1,3)
+            d = (grid @ camera[:3,:3].T)
             d = d / torch.norm(d, dim=-1, keepdim=True) # normalize
             o = torch.zeros_like(d) + camera[:3, 3]
 
-            # TODO: set rays origin to the near plane instead of camera origin
-            
-            rays_d.append(d)
-            rays_o.append(o)
-        rays_d, rays_o = torch.cat(rays_d), torch.cat(rays_o)
-        return rays_d, rays_o
+            rays_o.append(d)
+            rays_d.append(o)
+        return rays_o, rays_d
 
-class NerfDataset(Dataset):
+class ImagesDataset(Dataset):
     def __init__(self, data: NerfData):
-        self.rays_o: torch.Tensor # [n_rays, 3]
-        self.rays_d: torch.Tensor # [n_rays, 3]
-        self.rgbs: torch.Tensor | None # [n_rays, 3], None when doing novel view synthesis
-        self.indices: torch.Tensor # [n_rays, 1] index of the image the ray belongs to
-        self.cameras: List[torch.Tensor] # [n_images, 4, 4] camera matrices
-        self.shape: torch.Tensor
-
-        self.load_and_transform(data)
-
-    def load_and_transform(self, data: NerfData):
-        self.rays_o, self.rays_d = data.generate_rays()
-        self.indices = torch.repeat_interleave(torch.arange(data.n_img), torch.prod(data.shape,-1)).short()
-        self.shape = data.shape
-
-        if data.img_paths is not None:
-            imgs = []
-            for path in data.img_paths:
-                with Image.open(path) as img:
-                    if img.mode == "RGBA":
-                        bg = Image.new('RGBA', img.size, (255, 255, 255))
-                        img = Image.alpha_composite(bg, img).convert('RGB')
-                    torch_img = torch.from_numpy(np.array(img, dtype=np.single)) # TODO : copy?
-                    torch_img /= torch_img.max()
-                    imgs.append(torch_img)
-            self.rgbs = torch.cat([t.view(-1, 3) for t in imgs])
-
-    def recover_images(self, rgbs: torch.Tensor, indices: torch.Tensor | None = None) -> List[torch.Tensor]:
-        """ Reshape a list of (rgb, camera index) into a list of images """
-        if indices is None:
-            indices = self.indices
-        imgs = [rgbs[indices==idx].view([3, *self.shape[idx].tolist()]) for idx in torch.unique(indices)]
-        return imgs
+        # Note: h,w can be different for each image
+        self.rays_o, self.rays_d = data.generate_rays() # [n_images][h, w, 3]
+        self.rgbs = data.imgs # [n_images][h, w, 3], None when doing novel view synthesis
 
     def __len__(self):
-        return self.indices.size(0)
+        return len(self.rays_o)
 
     def __getitem__(self, idx):
         data = {
             "rays_o": self.rays_o[idx],
             "rays_d": self.rays_d[idx],
-            "indices": self.indices[idx]
+        }
+        if self.rgbs is not None:
+            data["rgbs"] = self.rgbs[idx]
+        return data
+
+class RaysDataset(Dataset):
+    def __init__(self, data: NerfData):
+        rays_o, rays_d = data.generate_rays()
+        self.rays_o = torch.cat([t.view(-1, 3) for t in rays_o]) # [n_rays, 3]
+        self.rays_d = torch.cat([t.view(-1, 3) for t in rays_d]) # [n_rays, 3]
+        self.rgbs = torch.cat([t.view(-1, 3) for t in data.imgs]) if data.imgs is not None else None # [n_rays, 3]
+
+    def __len__(self):
+        return self.rays_o.size(0)
+
+    def __getitem__(self, idx):
+        data = {
+            "rays_o": self.rays_o[idx],
+            "rays_d": self.rays_d[idx],
         }
         if self.rgbs is not None:
             data["rgbs"] = self.rgbs[idx]
@@ -120,14 +106,23 @@ class NerfDataset(Dataset):
 def parse_nerf_synthetic(scene_path: Path, split: str = "train") -> NerfData:
     with open(scene_path / f"transforms_{split}.json") as f_in:
         data = json.load(f_in)
-    image_paths, cameras = [], []
+    imgs, cameras = [], []
+    intrinsics = None
     for frame in data['frames']:
-        image_paths.append((scene_path / frame['file_path']).with_suffix('.png'))
+        image_path = (scene_path / frame['file_path']).with_suffix('.png')
+        with Image.open(image_path) as img:
+            if intrinsics is None:
+                w, h = img.size
+                camera_angle_x = data['camera_angle_x']
+                focal = w / (2. * np.tan(0.5 * camera_angle_x))
+                intrinsics = Intrinsics(focal, focal, w/2., h/2., w, h)
+
+            if img.mode == "RGBA":
+                bg = Image.new('RGBA', img.size, (255, 255, 255))
+                img = Image.alpha_composite(bg, img).convert('RGB')
+            torch_img = torch.from_numpy(np.array(img, dtype=np.single)) # TODO : copy?
+            torch_img /= 255.
+            imgs.append(torch_img)
         cameras.append(torch.tensor(frame['transform_matrix']))
-    # Compute intrinsics
-    with Image.open(image_paths[0]) as img:
-        w, h = img.size
-        camera_angle_x = data['camera_angle_x']
-        focal = w / (2. * np.tan(0.5 * camera_angle_x))
-        intrinsics = Intrinsics(focal, focal, w/2., h/2., w, h)
-    return NerfData(img_paths=image_paths, cameras=cameras, intrinsics=intrinsics)
+    assert intrinsics is not None
+    return NerfData(imgs=imgs, cameras=cameras, intrinsics=intrinsics)
