@@ -90,8 +90,13 @@ def train_vanilla(cfg: VanillaTrainConfig):
                     with torch.autocast(device.type, enabled=device.type=='cuda'): # type: ignore
                         if step < 256 or step % 32 == 0:
                             occupancy_grid.update(occupancy_fn, 0.01)
+
                         rendered_rgbs = renderer(rays_o, rays_d)
                         loss = torch.mean((rendered_rgbs - rgbs)**2)
+
+                        if cfg.method == 'kplanes':
+                            loss += renderer.feature_module.loss_tv() * 1. # type: ignore
+                            loss += renderer.feature_module.loss_l1() * 1e-3 # type: ignore
 
                     optimizer.zero_grad()
                     scaler.scale(loss).backward() # type: ignore

@@ -1,6 +1,6 @@
 import itertools
 import torch
-from typing import List, Tuple, Callable
+from typing import List, Tuple, Callable, cast
 from dataclasses import dataclass
 
 """Vanilla NeRF"""
@@ -89,6 +89,14 @@ class KPlanesFeaturePlane(torch.nn.Module):
             align_corners=False 
         ).view(new_shape)
 
+    def loss_tv(self) -> torch.Tensor:
+        tv_x = torch.nn.functional.mse_loss(self.plane[:, :, 1:, :], self.plane[:, :, :-1, :])
+        tv_y = torch.nn.functional.mse_loss(self.plane[:, :, :, 1:], self.plane[:, :, :, :-1])
+        return tv_x + tv_y
+
+    def loss_l1(self) -> torch.Tensor:
+        return torch.mean(torch.abs(self.plane))
+
 class KPlanesFeatureField(torch.nn.Module):
     def __init__(self, feature_dim: int = 32):
         super().__init__()
@@ -129,6 +137,24 @@ class KPlanesFeatureField(torch.nn.Module):
                 current_scale_features *= plane(x[..., (i,j)])
             features.append(current_scale_features)
         return torch.cat(features, -1) # type: ignore
+
+    def loss_tv(self) -> torch.Tensor:
+        loss = 0.
+        count = 0
+        for plane_scale in self.planes:
+            for plane in plane_scale: # type: ignore
+                loss += plane.loss_tv()
+                count += 1
+        return cast(torch.Tensor, loss) / count
+
+    def loss_l1(self) -> torch.Tensor:
+        loss = 0.
+        count = 0
+        for plane_scale in self.planes:
+            for plane in plane_scale: # type: ignore
+                loss += plane.loss_l1()
+                count += 1
+        return cast(torch.Tensor, loss) / count
 
 class KPlanesExplicitOpacityDecoder(torch.nn.Module):
     def __init__(self, feature_dim):
