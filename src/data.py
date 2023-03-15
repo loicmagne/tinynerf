@@ -59,10 +59,10 @@ class NerfData:
 
             # Apply camera transformation
             d = (grid @ camera[:3,:3].T).view(-1,3)
+            d = d / torch.norm(d, dim=-1, keepdim=True) # normalize
             o = torch.zeros_like(d) + camera[:3, 3]
 
             # TODO: set rays origin to the near plane instead of camera origin
-            # TODO: normalize?
             
             rays_d.append(d)
             rays_o.append(o)

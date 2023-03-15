@@ -46,4 +46,5 @@ def test_kplanes():
     assert features.size() == (n_rays, feature_field.feature_dim)
     assert opacity.size() == (n_rays, 1)
     assert color.size() == (n_rays, 3)
-    
+    assert feature_field.loss_l1().item() >= 0.
+    assert feature_field.loss_tv().item() >= 0.

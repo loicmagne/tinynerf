@@ -108,7 +108,6 @@ class NerfRenderer(torch.nn.Module):
 
         # Generate samples along each ray
         # TODO : precompute and store t_values
-        # TODO: distances are wrong for now since they don't account for ray direction norm -> should normalize rays_d?
         t_values, distances = clipped_exponential_stepping(self.near, self.far, self.delta_min, self.delta_max, device)
         # jitter samples along ray when training
         if self.training:
