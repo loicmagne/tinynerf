@@ -1,5 +1,6 @@
-from src.data import NerfDataset, NerfData, parse_nerf_synthetic
+from src.data import NerfDataset
 from src.models import VanillaFeatureMLP, VanillaOpacityDecoder, VanillaColorDecoder
+from src.models import KPlanesFeatureField, KPlanesExplicitOpacityDecoder, KPlanesExplicitColorDecoder
 from src.core import OccupancyGrid, NerfRenderer, mip360_contract, psnr
 from dataclasses import dataclass, asdict
 from torch.utils.data import DataLoader
@@ -9,6 +10,7 @@ from PIL import Image
 from pathlib import Path
 import json
 import torch
+import torch.amp as amp
 
 @dataclass
 class TrainMetrics:
@@ -26,22 +28,37 @@ class VanillaTrainConfig:
     train_dataset: NerfDataset
     test_dataset: NerfDataset | None
     output: Path
+    method: str
     steps: int
     batch_size: int
     eval_every: int
+    occupancy_res: int
 
 def train_vanilla(cfg: VanillaTrainConfig):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     train_loader = DataLoader(cfg.train_dataset, cfg.batch_size, shuffle=True)
     test_loader = DataLoader(cfg.test_dataset, cfg.batch_size, shuffle=False) if cfg.test_dataset else None
-    
-    feature_module = VanillaFeatureMLP(10, [256 for k in range(8)])
-    sigma_decoder = VanillaOpacityDecoder(feature_module.feature_dim)
-    rgb_decoder = VanillaColorDecoder(4, feature_module.feature_dim, [128])
-    
+
+    feature_module: torch.nn.Module
+    sigma_decoder: torch.nn.Module
+    rgb_decoder: torch.nn.Module
+
+    if cfg.method == 'vanilla':
+        feature_module = VanillaFeatureMLP(10, [256 for k in range(8)])
+        dim = feature_module.feature_dim
+        sigma_decoder = VanillaOpacityDecoder(dim)
+        rgb_decoder = VanillaColorDecoder(4, dim, [128])
+    elif cfg.method == 'kplanes':
+        feature_module = KPlanesFeatureField(32)
+        dim = feature_module.feature_dim
+        sigma_decoder = KPlanesExplicitOpacityDecoder(dim)
+        rgb_decoder = KPlanesExplicitColorDecoder(dim)
+    else:
+        raise NotImplementedError(f'Unknown method {cfg.method}.')
+
     occupancy_fn = lambda t: sigma_decoder(feature_module(t))
-    occupancy_grid = OccupancyGrid(32)
+    occupancy_grid = OccupancyGrid(cfg.occupancy_res)
 
     renderer = NerfRenderer(
         occupancy_grid,
@@ -53,6 +70,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
         far=1e10,
     ).to(device)
     optimizer = torch.optim.Adam(renderer.parameters(), lr=3e-4)
+    scaler = torch.cuda.amp.GradScaler() # type: ignore
 
     def loop() -> tuple[list[TrainMetrics], list[TestMetrics]]: 
         train_metrics: List[TrainMetrics] = []
@@ -69,15 +87,16 @@ def train_vanilla(cfg: VanillaTrainConfig):
                     rays_d = batch['rays_d'].to(device)
                     rgbs = batch['rgbs'].to(device)
 
-                    if step < 256 or step % 32 == 0:
-                        occupancy_grid.update(occupancy_fn, 0.01)
-
-                    rendered_rgbs = renderer(rays_o, rays_d)
-                    loss = torch.mean((rendered_rgbs - rgbs)**2)
+                    with torch.autocast(device.type, enabled=device.type=='cuda'): # type: ignore
+                        if step < 256 or step % 32 == 0:
+                            occupancy_grid.update(occupancy_fn, 0.01)
+                        rendered_rgbs = renderer(rays_o, rays_d)
+                        loss = torch.mean((rendered_rgbs - rgbs)**2)
 
                     optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
+                    scaler.scale(loss).backward() # type: ignore
+                    scaler.step(optimizer)
+                    scaler.update()
 
                     train_loss = loss.detach().cpu().item()
                     occupancy = occupancy_grid.grid.sum().item() / occupancy_grid.grid.numel()
