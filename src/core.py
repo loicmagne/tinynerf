@@ -106,7 +106,8 @@ class NerfRenderer(torch.nn.Module):
         self,
         rays_o: torch.Tensor, # [n, 3]
         rays_d: torch.Tensor, # [n, 3]
-        early_termination: float = 1e-4 # early ray termination threshold
+        opacity_threshold: float = 1e-2,
+        early_termination_threshold: float = 1e-4
     ) -> torch.Tensor:
         device = rays_o.device
 
@@ -120,9 +121,9 @@ class NerfRenderer(torch.nn.Module):
         n_rays = rays_o.size(0)
         n_samples = t_values.size(0)
 
-        samples_grid = rays_o[:, None, :] + rays_d[:, None, :] * t_values[None, :, None]
-        # samples_grid = self.contraction(samples_grid)
-        mask : torch.Tensor = torch.ones(n_rays, n_samples, dtype=torch.bool).to(device) # self.occupancy_grid(samples_grid)
+        samples_grid = rays_o[:,None,:] + rays_d[:,None,:] * t_values[None,:,None]
+        samples_grid = self.contraction(samples_grid)
+        mask : torch.Tensor = self.occupancy_grid(samples_grid, threshold=opacity_threshold)
 
         samples_features = torch.zeros(n_rays, n_samples, cast(int, self.feature_module.feature_dim), device=device)
         samples_sigmas = torch.zeros(n_rays, n_samples, device=device)
@@ -139,7 +140,7 @@ class NerfRenderer(torch.nn.Module):
         alpha = 1. - torch.exp(alpha)
         weights = transmittance * alpha
 
-        mask = mask # & (transmittance > early_termination)
+        mask = mask & (transmittance > early_termination_threshold)
 
         # compute rgb for remaining samples
         samples_rgbs[mask] = self.rgb_decoder(
