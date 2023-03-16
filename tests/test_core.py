@@ -4,13 +4,11 @@ from src.models import VanillaFeatureMLP, VanillaOpacityDecoder, VanillaColorDec
 
 def test_occupancy_grid():
     grid = OccupancyGrid(128)
-    def occupancy_fn(t: torch.Tensor):
-        return 1. * (torch.min(t[:,:2], -1)[0] > 0.5)
-    grid.update(occupancy_fn, 0.5)
-    
-    # about 1/4 of the occupancies should be set
-    assert grid.grid.sum().item() >= grid.n_voxels / 5.
-    assert grid.grid.sum().item() <= 2. * grid.n_voxels / 5.
+    grid.grid[:,:,64:] = 0.
+
+    # about 1/2 of the occupancies should be set
+    assert grid.grid.sum().item() >= grid.grid.numel() / 3.
+    assert grid.grid.sum().item() <= 2. * grid.grid.numel() / 3.
     assert grid.grid.size() == (128, 128, 128)
 
     coords = [ 
@@ -25,36 +23,33 @@ def test_occupancy_grid():
     ]
     unit_coords = 2. * (torch.tensor(coords) / grid.size) - 1.
     occs = [
-        False,
-        False,
-        False,
+        True,
+        True,
+        True,
         True,
         False,
         False,
         False,
-        True
+        False,
     ]
-    for c, o in zip(coords, occs):
-        assert grid.grid[c[2], c[1], c[0]] == o
-    
+
+
+    print(grid(unit_coords))
     assert torch.all(grid(unit_coords) == torch.tensor(occs))
-    
+ 
 def test_occupancy_grid_update():
     # setup vanilla nerf
     feature_mlp = VanillaFeatureMLP(10, [256 for k in range(8)])
     opacity_decoder = VanillaOpacityDecoder(256)
 
-    def occupancy_fn(t: torch.Tensor):
+    def sigma_fn(t: torch.Tensor):
         features = feature_mlp(t)
         opacity = opacity_decoder(features)
         return opacity
 
     occupancy_grid = OccupancyGrid(32)
-    occupancy_grid.update(occupancy_fn, 0.)
-    assert occupancy_grid.grid.sum().item() == occupancy_grid.n_voxels
-
-    occupancy_grid.update(occupancy_fn, 0.5)
-    assert occupancy_grid.grid.sum().item() <= occupancy_grid.n_voxels
+    occupancy_grid.update(sigma_fn)
+    assert occupancy_grid.grid.sum().item() <= occupancy_grid.grid.numel()
 
 def test_renderer_vanilla_nerf():
     # setup vanilla nerf
@@ -68,7 +63,7 @@ def test_renderer_vanilla_nerf():
         return opacity
 
     occupancy_grid = OccupancyGrid(64)
-    occupancy_grid.update(occupancy_fn, 0.001)
+    occupancy_grid.update(occupancy_fn)
 
     renderer = NerfRenderer(
         occupancy_grid,

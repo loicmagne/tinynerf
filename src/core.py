@@ -28,36 +28,40 @@ def mip360_contract(coords: torch.Tensor) -> torch.Tensor:
     return torch.where(norm <= 1., coords, (2. - 1./norm) * coords / norm) / 2.
 
 class OccupancyGrid(torch.nn.Module):
-    def __init__(self, size: List[int] | int):
+    def __init__(self, size: List[int] | int, decay: float = 0.95):
         super().__init__()
         size = size if isinstance(size, List) else [size, size, size]
-        self.n_voxels = math.prod(size)
+        self.decay = decay
     
         self.grid: torch.Tensor
-        self.register_buffer("grid", torch.zeros(size, dtype=torch.float))
+        self.register_buffer("grid", torch.ones(size, dtype=torch.float))
         self.coords = torch.stack(torch.meshgrid([
             torch.arange(size[0], dtype=torch.float),
             torch.arange(size[1], dtype=torch.float),
             torch.arange(size[2], dtype=torch.float)
-        ], indexing="ij"), -1).view(-1, 3)
+        ], indexing="ij"), -1)
         self.size = torch.tensor(size, dtype=torch.float)
 
     @torch.no_grad()
-    def update(self, occupancy_fn: Callable[[torch.Tensor], torch.Tensor], threshold: float = 0.01):
-        coords = (self.coords + torch.rand_like(self.coords)) / self.size # jitter inside voxel 
-        coords = coords.to(self.grid.device)
-        self.grid = (occupancy_fn(coords) > threshold).view(self.grid.shape).float() # TODO: batch evaluation
+    def update(self, sigma_fn: Callable[[torch.Tensor], torch.Tensor]):
+        batch_shape = self.grid[0].size()
+        for i in range(self.grid.size(0)):
+            coords = (self.coords[i] + torch.rand_like(self.coords[i])) / self.size # jitter inside voxel 
+            coords = coords.view(-1, 3).contiguous().to(self.grid.device)
+            alpha = (1. - torch.exp(-sigma_fn(coords) * 1.)).view(batch_shape) # TODO: add step size
+            self.grid[i] = torch.maximum(self.grid[i] * self.decay, alpha)
 
     @torch.no_grad()
-    def forward(self, coords: torch.Tensor) -> torch.Tensor:
+    def forward(self, coords: torch.Tensor, threshold: float = 0.01) -> torch.Tensor:
         """"coords: [..., 3], normalized [-1,1] coordinates"""
+        new_shape = coords.shape[:-1]
         values = torch.nn.functional.grid_sample(
             # self.grid[None,None,...]
             self.grid.unsqueeze(0).unsqueeze(0),
             coords.view(1,-1,1,1,3),
             mode="bilinear", align_corners=False # TODO: align_corners=True?
-        ).view(-1)
-        return values
+        ).view(new_shape).contiguous()
+        return values > threshold
 
 def clipped_exponential_stepping(near: float, far: float, delta_min: float, delta_max: float, device: torch.device):
     """Clipped exponential stepping function as described in Instant-NGP paper"""
@@ -117,25 +121,25 @@ class NerfRenderer(torch.nn.Module):
         n_samples = t_values.size(0)
 
         samples_grid = rays_o[:, None, :] + rays_d[:, None, :] * t_values[None, :, None]
-        samples_grid = self.contraction(samples_grid)
-        mask : torch.Tensor = self.occupancy_grid(samples_grid).view(n_rays, n_samples).bool()
+        # samples_grid = self.contraction(samples_grid)
+        mask : torch.Tensor = torch.ones(n_rays, n_samples, dtype=torch.bool).to(device) # self.occupancy_grid(samples_grid)
 
         samples_features = torch.zeros(n_rays, n_samples, cast(int, self.feature_module.feature_dim), device=device)
         samples_sigmas = torch.zeros(n_rays, n_samples, device=device)
         samples_rgbs = torch.zeros(n_rays, n_samples, 3, device=device)
 
         # compute features and density for remaining samples
-        samples_features[mask] = self.feature_module(samples_grid[mask])
+        samples_features[mask] = self.feature_module(self.contraction(samples_grid[mask]))
         samples_sigmas[mask] = self.sigma_decoder(samples_features[mask]).squeeze()
-        
+ 
         # compute transmittance and alpha
         alpha = -samples_sigmas * distances[None, :] # not actually alpha
         transmittance = torch.exp(torch.cumsum(alpha, 1))[:, :-1]
         transmittance = torch.cat([torch.ones(n_rays,1).to(device), transmittance], dim=1) # shift transmittance to the right
         alpha = 1. - torch.exp(alpha)
         weights = transmittance * alpha
-        
-        mask = mask & (weights > early_termination)
+
+        mask = mask # & (transmittance > early_termination)
 
         # compute rgb for remaining samples
         samples_rgbs[mask] = self.rgb_decoder(
@@ -144,7 +148,7 @@ class NerfRenderer(torch.nn.Module):
         ) * weights[mask][:, None]
 
         rendered_rgb = samples_rgbs.sum(1) # accumulate rgb
-        
+
         return rendered_rgb
 
 def psnr(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:

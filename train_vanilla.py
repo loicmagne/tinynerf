@@ -1,4 +1,4 @@
-# python train_vanilla.py --train tests/dummy/hotdog --test tests/dummy/hotdog --output data/output --method vanilla --steps 1000 --batch_size 64 --eval_every 300 --occupancy_res 32 
+#python train_vanilla.py --data data/lego --output data/output --method vanilla --steps 10000 --batch_size 4096 --eval_every 250 --eval_n 5 --occupancy_res 128
 import argparse
 from pathlib import Path
 from src.train import train_vanilla, VanillaTrainConfig
@@ -19,7 +19,7 @@ def get_config() -> VanillaTrainConfig:
     args = parser.parse_args()
 
     train_dataset = RaysDataset(parse_nerf_synthetic(Path(args.data), 'train'))
-    test_dataset = ImagesDataset(parse_nerf_synthetic(Path(args.data), 'train'))
+    test_dataset = ImagesDataset(parse_nerf_synthetic(Path(args.data), 'test'))
 
     return VanillaTrainConfig(
         train_dataset,

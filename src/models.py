@@ -15,7 +15,7 @@ class PositionalEncoding(torch.nn.Module):
         x = x[...,None] * self.freqs
         x = torch.cat([torch.sin(x), torch.cos(x)], -1)
         return x.flatten(-2)
-    
+
 class VanillaFeatureMLP(torch.nn.Module):
     def __init__(self, n_freqs: int, hidden_features: List[int]):
         super().__init__()
@@ -32,19 +32,19 @@ class VanillaFeatureMLP(torch.nn.Module):
 
     def forward(self, x):
         return self.net(x)
-    
+
 class VanillaOpacityDecoder(torch.nn.Module):
     def __init__(self, in_features: int):
         super().__init__()
         self.net = torch.nn.Sequential(
             torch.nn.Linear(in_features, 1),
-            torch.nn.Sigmoid(),
+            torch.nn.ReLU(),
         )
-    
+
     # TODO: activation function for density?
     def forward(self, x):
         return self.net(x)
-    
+
 class VanillaColorDecoder(torch.nn.Module):
     def __init__(self, n_freqs: int, in_features: int, hidden_features: List[int]):
         super().__init__()
@@ -60,11 +60,11 @@ class VanillaColorDecoder(torch.nn.Module):
             torch.nn.Linear(hidden_features[-1], 3),
             torch.nn.Sigmoid(),
         )
-    
+
     def forward(self, features: torch.Tensor, rays_d: torch.Tensor) -> torch.Tensor:
         x = torch.cat([self.pe(rays_d), features], -1)
         return self.net(x)
-    
+
 """K-Planes https://arxiv.org/abs/2301.10241"""
 
 class KPlanesFeaturePlane(torch.nn.Module):
@@ -78,7 +78,7 @@ class KPlanesFeaturePlane(torch.nn.Module):
         self.feature_dim = feature_dim
         self.plane = torch.nn.Parameter(torch.empty(1, feature_dim, *resolution))
         init(self.plane)
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: (..., 2)"""
         new_shape = [*x.size()[:-1],self.feature_dim]
@@ -87,7 +87,7 @@ class KPlanesFeaturePlane(torch.nn.Module):
             x.view(1,-1,1,2),
             mode='bilinear',
             align_corners=False 
-        ).view(new_shape)
+        ).squeeze().transpose(0,1).view(new_shape).contiguous()
 
     def loss_tv(self) -> torch.Tensor:
         tv_x = torch.nn.functional.mse_loss(self.plane[:, :, 1:, :], self.plane[:, :, :-1, :])
@@ -125,11 +125,11 @@ class KPlanesFeatureField(torch.nn.Module):
         for plane_scale in self.planes:
             assert isinstance(plane_scale, torch.nn.ModuleList)
             assert len(plane_scale) == len(self.dimension_pairs)
-        
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: (..., 3)
         returns"""
-        
+
         features = []
         for plane_scale in self.planes:
             current_scale_features = 1.
@@ -162,11 +162,11 @@ class KPlanesExplicitOpacityDecoder(torch.nn.Module):
         self.net = torch.nn.Sequential(
             torch.nn.Linear(feature_dim, feature_dim),
         )
-        
+
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         x = torch.sum(features * self.net(features), -1, keepdim=True)
-        return torch.exp(x)
-    
+        return torch.relu(x)
+
 class KPlanesExplicitColorDecoder(torch.nn.Module):
     def __init__(self, feature_dim, n_freqs = 4, hidden_dim = 128):
         super().__init__()

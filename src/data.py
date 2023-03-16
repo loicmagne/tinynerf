@@ -51,14 +51,14 @@ class NerfData:
             intrinsic = self.intrinsics[i] if isinstance(self.intrinsics, List) else self.intrinsics
             # Generate ray directions
             center = torch.tensor([intrinsic.cx, intrinsic.cy], dtype=torch.float)
-            focal = torch.tensor([intrinsic.fx, intrinsic.fy], dtype=torch.float)
+            focal = torch.tensor([intrinsic.fx, -intrinsic.fy], dtype=torch.float)
             # TODO : indexing might be wrong
             grid = torch.stack(torch.meshgrid(torch.arange(intrinsic.w, dtype=torch.float), torch.arange(intrinsic.h, dtype=torch.float), indexing="xy"), -1)
-            grid = (grid - center) / focal
-            grid = torch.nn.functional.pad(grid, (0,1), 'constant', 1.) # pad with 1 to get 3d coordinated
+            grid = (grid - center + 0.5) / focal
+            grid = torch.nn.functional.pad(grid, (0,1), 'constant', -1.) # pad with 1 to get 3d coordinated
 
             # Apply camera transformation
-            d = (grid @ camera[:3,:3].T)
+            d = (grid @ camera[:3,:3])
             d = d / torch.norm(d, dim=-1, keepdim=True) # normalize
             o = torch.zeros_like(d) + camera[:3, 3]
 
