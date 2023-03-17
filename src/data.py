@@ -26,7 +26,7 @@ class NerfData:
     intrinsics images, will see if it's ever useful
     """
     
-    cameras: List[torch.Tensor] # [n_images, 4, 4] camera matrices
+    cameras: torch.Tensor # [n_images, 4, 4] camera matrices
     intrinsics: Intrinsics | List[Intrinsics]
     imgs: Optional[List[torch.Tensor]] = None # [n_images], [h, w, 3] list of RGB HWC [0,1] images
     
@@ -71,12 +71,16 @@ class NerfData:
             rays_o.append(o)
             rays_d.append(d)
         return rays_o, rays_d
+    
+    def scene_scale(self) -> float:
+        return torch.max(torch.var(self.cameras[:, :3, 3], 0)).item()
 
 class ImagesDataset(Dataset):
     def __init__(self, data: NerfData):
         # Note: h,w can be different for each image
         self.rays_o, self.rays_d = data.generate_rays() # [n_images][h, w, 3]
         self.rgbs = data.imgs # [n_images][h, w, 3], None when doing novel view synthesis
+        self.scene_scale = data.scene_scale()
 
     def __len__(self):
         return len(self.rays_o)
@@ -96,6 +100,7 @@ class RaysDataset(Dataset):
         self.rays_o = torch.cat([t.view(-1, 3) for t in rays_o]) # [n_rays, 3]
         self.rays_d = torch.cat([t.view(-1, 3) for t in rays_d]) # [n_rays, 3]
         self.rgbs = torch.cat([t.view(-1, 3) for t in data.imgs]) if data.imgs is not None else None # [n_rays, 3]
+        self.scene_scale = data.scene_scale()
 
     def __len__(self):
         return self.rays_o.size(0)
@@ -129,6 +134,10 @@ def parse_nerf_synthetic(scene_path: Path, split: str = "train") -> NerfData:
             torch_img = torch.from_numpy(np.array(img, dtype=np.single)) # TODO : copy?
             torch_img /= 255.
             imgs.append(torch_img)
-        cameras.append(torch.tensor(frame['transform_matrix']))
+        cameras.append(frame['transform_matrix'])
     assert intrinsics is not None
-    return NerfData(imgs=imgs, cameras=cameras, intrinsics=intrinsics)
+    return NerfData(
+        imgs=imgs,
+        cameras=torch.tensor(cameras, dtype=torch.float),
+        intrinsics=intrinsics
+    )

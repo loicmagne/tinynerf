@@ -26,6 +26,18 @@ def mip360_contract(coords: torch.Tensor) -> torch.Tensor:
     norm = torch.norm(coords, dim=-1, keepdim=True) # type: ignore 
     return torch.where(norm <= 1., coords, (2. - 1./norm) * coords / norm) / 2.
 
+def unbounded_stepping(near: float, uniform_range: float, n_samples: int, device: torch.device):
+    """uniform steps between near and near+uniform_range, then uniform disparity steps
+    n_samples//2 samples are used for uniform range, n_samples//2 for disparity range"""
+    ts = torch.linspace(0., 1.-(1./(n_samples+2)), n_samples+1, device=device)
+    f = lambda x: torch.where(x < 0.5, 2 * x, 1 / (2 - 2 * x))
+    ts = f(ts) * uniform_range + near
+    steps = ts[1:] - ts[:-1]
+    return ts[:-1], steps
+
+def psnr(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    return - 10. * torch.log10(torch.mean((x - y) ** 2))
+
 class OccupancyGrid(torch.nn.Module):
     def __init__(self, size: List[int] | int, decay: float = 0.95):
         super().__init__()
@@ -62,26 +74,6 @@ class OccupancyGrid(torch.nn.Module):
         ).view(new_shape).contiguous()
         return values > threshold
 
-def clipped_exponential_stepping(near: float, far: float, delta_min: float, delta_max: float, device: torch.device):
-    """Clipped exponential stepping function as described in Instant-NGP paper"""
-    t = near
-    acc_ts, acc_steps = [t], []
-    while t < far:
-        step = min(delta_max, max(delta_min, t))
-        t += step
-        acc_ts.append(t)
-        acc_steps.append(step)
-    ts = torch.tensor(acc_ts[:-1], device=device)
-    steps = torch.tensor(acc_steps, device=device)
-    return ts, steps
-
-
-def uniform_stepping(near: float, far: float, n_samples: int, device: torch.device):
-    """uniform steps"""
-    ts = torch.linspace(near, far, n_samples+1, device=device)
-    steps = ts[1:] - ts[:-1]
-    return ts[:-1], steps
-
 @dataclass
 class RenderingStats:
     total_samples: int = 0
@@ -97,7 +89,7 @@ class NerfRenderer(torch.nn.Module):
         rgb_decoder: torch.nn.Module,
         contraction: Callable[[torch.Tensor], torch.Tensor] = mip360_contract,
         near: float = 0.,
-        far: float = 10.,
+        scene_scale: float = 1.,
         delta_min: float = 1e-4,
         delta_max: float = 1e10,
     ):
@@ -108,7 +100,7 @@ class NerfRenderer(torch.nn.Module):
         self.rgb_decoder = rgb_decoder
         self.contraction = contraction
         self.near = near
-        self.far = far
+        self.scene_scale = scene_scale
         self.delta_min = delta_min
         self.delta_max = delta_max
 
@@ -118,27 +110,29 @@ class NerfRenderer(torch.nn.Module):
         self,
         rays_o: torch.Tensor, # [n, 3]
         rays_d: torch.Tensor, # [n, 3]
+        n_samples: int = 250,
         opacity_threshold: float = 1e-2,
         early_termination_threshold: float = 1e-4
     ) -> Tuple[torch.Tensor, RenderingStats]:
         device = rays_o.device
+        n_rays = rays_o.size(0)
+
         stats = RenderingStats()
+        stats.total_samples = n_rays * n_samples
 
         # Generate samples along each ray
         # TODO : precompute and store t_values
-        t_values, distances = clipped_exponential_stepping(self.near, self.far, self.delta_min, self.delta_max, device)
-        t_values, distances = uniform_stepping(self.near, self.far, 100, device)
+        t_values, distances = unbounded_stepping(self.near, self.scene_scale, n_samples, device)
         # jitter samples along ray when training
+        t_values = t_values[None,:].expand(n_rays, -1) # expand to [n_rays, n_samples] so we can jitter differently for each ray
+        distances = distances[None,:].expand(n_rays, -1)
         if self.training:
             t_values = t_values + torch.rand_like(t_values) * distances
 
-        n_rays = rays_o.size(0)
-        n_samples = t_values.size(0)
-        stats.total_samples = n_rays * n_samples
+        samples = rays_o[:,None,:] + rays_d[:,None,:] * t_values[...,None]
+        samples = self.contraction(samples)
 
-        samples_grid = rays_o[:,None,:] + rays_d[:,None,:] * t_values[None,:,None]
-        samples_grid = self.contraction(samples_grid)
-        mask : torch.Tensor = self.occupancy_grid(samples_grid, threshold=opacity_threshold)
+        mask : torch.Tensor = self.occupancy_grid(samples, threshold=opacity_threshold)
         stats.skipped_opacity = 1. - mask.float().mean().item()
 
         samples_features = torch.zeros(n_rays, n_samples, cast(int, self.feature_module.feature_dim), device=device)
@@ -146,11 +140,11 @@ class NerfRenderer(torch.nn.Module):
         samples_rgbs = torch.zeros(n_rays, n_samples, 3, device=device)
 
         # compute features and density for remaining samples
-        samples_features[mask] = self.feature_module(self.contraction(samples_grid[mask]))
+        samples_features[mask] = self.feature_module(samples[mask])
         samples_sigmas[mask] = self.sigma_decoder(samples_features[mask]).squeeze()
  
         # compute transmittance and alpha
-        alpha = -samples_sigmas * distances[None, :] # not actually alpha
+        alpha = -samples_sigmas * distances # not actually alpha
         transmittance = torch.exp(torch.cumsum(alpha, 1))[:, :-1]
         transmittance = torch.cat([torch.ones(n_rays,1).to(device), transmittance], dim=1) # shift transmittance to the right
         alpha = 1. - torch.exp(alpha)
@@ -168,6 +162,3 @@ class NerfRenderer(torch.nn.Module):
         rendered_rgb = samples_rgbs.sum(1) # accumulate rgb
 
         return rendered_rgb, stats
-
-def psnr(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    return - 10. * torch.log10(torch.mean((x - y) ** 2))

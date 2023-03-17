@@ -62,13 +62,13 @@ def train_vanilla(cfg: VanillaTrainConfig):
     occupancy_grid = OccupancyGrid(cfg.occupancy_res, 1.)
 
     renderer = NerfRenderer(
-        occupancy_grid,
-        feature_module,
-        sigma_decoder,
-        rgb_decoder,
-        mip360_contract,
-        near=0.,
-        far=1e10,
+        occupancy_grid=occupancy_grid,
+        feature_module=feature_module,
+        sigma_decoder=sigma_decoder,
+        rgb_decoder=rgb_decoder,
+        contraction=mip360_contract,
+        near=0.5,
+        scene_scale=cfg.train_rays.scene_scale,
     ).to(device)
     optimizer = torch.optim.Adam(renderer.parameters(), lr=3e-4)
 
