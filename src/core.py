@@ -17,14 +17,13 @@ finally we compute rgbs for remaining samples, and we can accumulate to compute 
   allocating memory for samples which are discarded by the occupancy grid as done in nerfacc, but that is harder to work with triton
 """
 
-from typing import Callable, List, cast
-import numpy as np
+from typing import Callable, Tuple, List, cast
+from dataclasses import dataclass
 import torch
-import math
 
 def mip360_contract(coords: torch.Tensor) -> torch.Tensor:
     """Scene contraction from Mip-NeRF 360 https://arxiv.org/abs/2111.12077"""
-    norm = torch.norm(coords, float("inf"), -1, keepdim=True) # type: ignore 
+    norm = torch.norm(coords, dim=-1, keepdim=True) # type: ignore 
     return torch.where(norm <= 1., coords, (2. - 1./norm) * coords / norm) / 2.
 
 class OccupancyGrid(torch.nn.Module):
@@ -76,6 +75,19 @@ def clipped_exponential_stepping(near: float, far: float, delta_min: float, delt
     steps = torch.tensor(acc_steps, device=device)
     return ts, steps
 
+
+def uniform_stepping(near: float, far: float, n_samples: int, device: torch.device):
+    """uniform steps"""
+    ts = torch.linspace(near, far, n_samples+1, device=device)
+    steps = ts[1:] - ts[:-1]
+    return ts[:-1], steps
+
+@dataclass
+class RenderingStats:
+    total_samples: int = 0
+    skipped_opacity: float = 0.
+    skipped_transmittance: float = 0.
+
 class NerfRenderer(torch.nn.Module):
     def __init__(
         self,
@@ -85,8 +97,8 @@ class NerfRenderer(torch.nn.Module):
         rgb_decoder: torch.nn.Module,
         contraction: Callable[[torch.Tensor], torch.Tensor] = mip360_contract,
         near: float = 0.,
-        far: float = 1e5,
-        delta_min: float = math.sqrt(3.)/1024.,
+        far: float = 10.,
+        delta_min: float = 1e-4,
         delta_max: float = 1e10,
     ):
         super().__init__()
@@ -108,22 +120,26 @@ class NerfRenderer(torch.nn.Module):
         rays_d: torch.Tensor, # [n, 3]
         opacity_threshold: float = 1e-2,
         early_termination_threshold: float = 1e-4
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, RenderingStats]:
         device = rays_o.device
+        stats = RenderingStats()
 
         # Generate samples along each ray
         # TODO : precompute and store t_values
         t_values, distances = clipped_exponential_stepping(self.near, self.far, self.delta_min, self.delta_max, device)
+        t_values, distances = uniform_stepping(self.near, self.far, 100, device)
         # jitter samples along ray when training
         if self.training:
             t_values = t_values + torch.rand_like(t_values) * distances
 
         n_rays = rays_o.size(0)
         n_samples = t_values.size(0)
+        stats.total_samples = n_rays * n_samples
 
         samples_grid = rays_o[:,None,:] + rays_d[:,None,:] * t_values[None,:,None]
         samples_grid = self.contraction(samples_grid)
         mask : torch.Tensor = self.occupancy_grid(samples_grid, threshold=opacity_threshold)
+        stats.skipped_opacity = 1. - mask.float().mean().item()
 
         samples_features = torch.zeros(n_rays, n_samples, cast(int, self.feature_module.feature_dim), device=device)
         samples_sigmas = torch.zeros(n_rays, n_samples, device=device)
@@ -141,6 +157,7 @@ class NerfRenderer(torch.nn.Module):
         weights = transmittance * alpha
 
         mask = mask & (transmittance > early_termination_threshold)
+        stats.skipped_transmittance = 1. - mask.float().mean().item()
 
         # compute rgb for remaining samples
         samples_rgbs[mask] = self.rgb_decoder(
@@ -150,7 +167,7 @@ class NerfRenderer(torch.nn.Module):
 
         rendered_rgb = samples_rgbs.sum(1) # accumulate rgb
 
-        return rendered_rgb
+        return rendered_rgb, stats
 
 def psnr(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return - 10. * torch.log10(torch.mean((x - y) ** 2))

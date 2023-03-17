@@ -1,6 +1,6 @@
 from src.models import VanillaFeatureMLP, VanillaOpacityDecoder, VanillaColorDecoder
 from src.models import KPlanesFeatureField, KPlanesExplicitOpacityDecoder, KPlanesExplicitColorDecoder
-from src.data import ImagesDataset
+from src.data import ImagesDataset, RaysDataset
 from src.core import OccupancyGrid, NerfRenderer, mip360_contract, psnr
 from dataclasses import dataclass, asdict
 from torch.utils.data import DataLoader
@@ -26,8 +26,9 @@ class TestMetrics:
 
 @dataclass
 class VanillaTrainConfig:
-    train_dataset: Dataset
-    test_dataset: Dataset | None
+    train_rays: RaysDataset
+    train_images: ImagesDataset
+    test_images: ImagesDataset
     output: Path
     method: str
     steps: int
@@ -39,7 +40,7 @@ class VanillaTrainConfig:
 def train_vanilla(cfg: VanillaTrainConfig):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    train_loader = DataLoader(cfg.train_dataset, cfg.batch_size, shuffle=True)
+    train_loader = DataLoader(cfg.train_rays, cfg.batch_size, shuffle=True)
 
     feature_module: torch.nn.Module
     sigma_decoder: torch.nn.Module
@@ -71,11 +72,56 @@ def train_vanilla(cfg: VanillaTrainConfig):
     ).to(device)
     optimizer = torch.optim.Adam(renderer.parameters(), lr=3e-4)
 
+    def eval(img_dataset: ImagesDataset, n: int, name: str):
+        count: int = 0
+        def closure(step: int):
+            nonlocal count
+            renderer.eval()
+            metrics_acc = []
+            with torch.no_grad():
+                metrics = TestMetrics()
+                for i in tqdm(range(n)):
+                    data = img_dataset[count % len(cast(ImagesDataset, img_dataset))]
+                    img = data['rgbs']
+                    rays_o = data['rays_o'].view(-1, 3)
+                    rays_d = data['rays_d'].view(-1, 3)
+                    rgbs = data['rgbs'].view(-1, 3)
+                    rendered_rgbs = []
+                    img_loss = []
+                    for k in range(0, len(rays_o), cfg.batch_size):
+                        start = k
+                        end = k + cfg.batch_size
+                        batch_rays_o = rays_o[start:end].to(device)
+                        batch_rays_d = rays_d[start:end].to(device)
+                        batch_rgbs = rgbs[start:end].to(device)
+
+                        batch_rendered_rgbs, _ = renderer(batch_rays_o, batch_rays_d)
+                        test_loss = torch.mean((batch_rendered_rgbs - batch_rgbs)**2).item()
+
+                        img_loss.append(test_loss)
+                        rendered_rgbs.append(batch_rendered_rgbs.cpu())
+                    rendered_img = torch.cat(rendered_rgbs, dim=0).view(img.shape)
+                    metrics.psnr += psnr(img, rendered_img).item()
+                    metrics.loss += torch.mean(torch.tensor(img_loss)).item()
+
+                    # Save image
+                    rendered_img = (255. * rendered_img).type(torch.uint8).numpy()
+                    Image.fromarray(rendered_img).save(cfg.output / f'{step}_{count}_{name}.png')
+
+                    count += 1
+                metrics.psnr /= cfg.eval_n
+                metrics.loss /= cfg.eval_n
+                metrics_acc.append(metrics)
+            return metrics_acc
+        return closure
+    
+    train_eval = eval(cfg.train_images, cfg.eval_n, 'train')
+    test_eval = eval(cfg.test_images, cfg.eval_n, 'test')
+
     def loop() -> tuple[list[TrainMetrics], list[TestMetrics]]: 
         train_metrics: List[TrainMetrics] = []
         test_metrics: List[TestMetrics] = []
         train_step = 0
-        test_step = 0
         with tqdm(total=cfg.steps) as pbar:
             while True:
                 for batch in train_loader:
@@ -87,10 +133,10 @@ def train_vanilla(cfg: VanillaTrainConfig):
                     rays_d = batch['rays_d'].to(device)
                     rgbs = batch['rgbs'].to(device)
 
-                    if train_step % 32 == 0 and train_step > 0 and False:
+                    if train_step % 32 == 0:
                         occupancy_grid.update(lambda t: renderer.sigma_decoder(renderer.feature_module(t)))
 
-                    rendered_rgbs = renderer(rays_o, rays_d)
+                    rendered_rgbs, stats = renderer(rays_o, rays_d)
                     loss = torch.mean((rendered_rgbs - rgbs)**2)
 
                     if cfg.method == 'kplanes' and False:
@@ -104,44 +150,12 @@ def train_vanilla(cfg: VanillaTrainConfig):
                     train_loss = loss.detach().cpu().item()
                     occupancy = occupancy_grid.grid.sum().item() / occupancy_grid.grid.numel()
                     train_metrics.append(TrainMetrics(train_loss, occupancy))
-                    pbar.set_postfix(loss=train_loss, occupancy=occupancy)
+                    pbar.set_postfix(loss=train_loss, occupancy=occupancy, **asdict(stats))
 
-                    if cfg.test_dataset and train_step % cfg.eval_every == 0 and train_step > 0:
-                        renderer.eval()
-                        with torch.no_grad():
-                            metrics = TestMetrics()
-                            for i in tqdm(range(cfg.eval_n)):
-                                data = cfg.test_dataset[test_step % len(cast(ImagesDataset, cfg.test_dataset))]
-                                img = data['rgbs']
-                                rays_o = data['rays_o'].view(-1, 3)
-                                rays_d = data['rays_d'].view(-1, 3)
-                                rgbs = data['rgbs'].view(-1, 3)
-                                rendered_rgbs = []
-                                img_loss = []
-                                for k in range(0, len(rays_o), cfg.batch_size):
-                                    start = k
-                                    end = k + cfg.batch_size
-                                    batch_rays_o = rays_o[start:end].to(device)
-                                    batch_rays_d = rays_d[start:end].to(device)
-                                    batch_rgbs = rgbs[start:end].to(device)
-
-                                    batch_rendered_rgbs = renderer(batch_rays_o, batch_rays_d)
-                                    test_loss = torch.mean((batch_rendered_rgbs - batch_rgbs)**2).item()
-
-                                    img_loss.append(test_loss)
-                                    rendered_rgbs.append(batch_rendered_rgbs.cpu())
-                                rendered_img = torch.cat(rendered_rgbs, dim=0).view(img.shape)
-                                metrics.psnr += psnr(img, rendered_img).item()
-                                metrics.loss += torch.mean(torch.tensor(img_loss)).item()
-
-                                # Save image
-                                rendered_img = (255. * rendered_img).type(torch.uint8).numpy()
-                                Image.fromarray(rendered_img).save(cfg.output / f'{train_step}_{i}_test.png')
-
-                                test_step += 1
-                            metrics.psnr /= cfg.eval_n
-                            metrics.loss /= cfg.eval_n
-                            test_metrics.append(metrics)
+                    if train_step % cfg.eval_every == 0 and train_step > 0:
+                        train_eval(train_step)
+                        metrics = test_eval(train_step)
+                        test_metrics.extend(metrics)
 
                     train_step += 1
                     pbar.update(1)

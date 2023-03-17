@@ -68,8 +68,8 @@ class NerfData:
             d /= torch.norm(d, dim=-1, keepdim=True) # normalize
             o = torch.broadcast_to(t, d.shape)
 
-            rays_o.append(d)
-            rays_d.append(o)
+            rays_o.append(o)
+            rays_d.append(d)
         return rays_o, rays_d
 
 class ImagesDataset(Dataset):
