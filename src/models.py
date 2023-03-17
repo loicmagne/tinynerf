@@ -38,7 +38,7 @@ class VanillaOpacityDecoder(torch.nn.Module):
         super().__init__()
         self.net = torch.nn.Sequential(
             torch.nn.Linear(in_features, 1),
-            torch.nn.ReLU(),
+            torch.nn.Softplus()
         )
 
     # TODO: activation function for density?
@@ -162,10 +162,11 @@ class KPlanesExplicitOpacityDecoder(torch.nn.Module):
         self.net = torch.nn.Sequential(
             torch.nn.Linear(feature_dim, feature_dim),
         )
+        self.activation = torch.nn.Softplus()
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         x = torch.sum(features * self.net(features), -1, keepdim=True)
-        return torch.relu(x)
+        return self.activation(x)
 
 class KPlanesExplicitColorDecoder(torch.nn.Module):
     def __init__(self, feature_dim, n_freqs = 4, hidden_dim = 128):
