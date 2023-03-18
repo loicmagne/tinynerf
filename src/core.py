@@ -21,22 +21,79 @@ from typing import Callable, Tuple, List, cast
 from dataclasses import dataclass
 import torch
 
-def mip360_contract(coords: torch.Tensor) -> torch.Tensor:
-    """Scene contraction from Mip-NeRF 360 https://arxiv.org/abs/2111.12077"""
-    norm = torch.norm(coords, p=float('inf'), dim=-1, keepdim=True) # type: ignore 
-    return torch.where(norm <= 1., coords, (2. - 1./norm) * coords / norm) / 2.
 
-def unbounded_stepping(near: float, uniform_range: float, n_samples: int, device: torch.device):
-    """uniform steps between near and near+uniform_range, then uniform disparity steps
-    n_samples//2 samples are used for uniform range, n_samples//2 for disparity range"""
-    ts = torch.linspace(0., 1.-(1./(n_samples+2)), n_samples+1, device=device)
-    f = lambda x: torch.where(x < 0.5, 2 * x, 1 / (2 - 2 * x))
-    ts = f(ts) * uniform_range + near
-    steps = ts[1:] - ts[:-1]
-    return ts[:-1], steps
+@dataclass
+class ContractionMip360():
+    order : float | int = float('inf')
 
-def psnr(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    return - 10. * torch.log10(torch.mean((x - y) ** 2))
+    def __call__(self, coords: torch.Tensor) -> Tuple[torch.Tensor, None]:
+        """Scene contraction from Mip-NeRF 360 https://arxiv.org/abs/2111.12077"""
+        norm = torch.norm(coords, p=self.order, dim=-1, keepdim=True) # type: ignore 
+        coords = torch.where(norm <= 1., coords, (2. - 1./norm) * coords / norm) / 2.
+        return coords, None
+
+@dataclass
+class ContractionAABB():
+    aabb: torch.Tensor # [2,3]
+
+    def __call__(self, coords: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Contract coords inside aabb to [-1,1], aabb.shape = [2,3]"""
+        mask = torch.all((coords >= self.aabb[0]) & (coords <= self.aabb[1]), dim=-1)
+        coords = (coords - self.aabb[0]) / (self.aabb[1] - self.aabb[0]) * 2. - 1.
+        return coords, mask
+
+Contraction = ContractionMip360 | ContractionAABB
+
+@dataclass
+class RayMarcherUnbounded():
+    n_samples: int = 200
+    near: float = 0.
+    far: float = 1e5
+    uniform_range: float = 1.
+
+    def __call__(self, rays_o: torch.Tensor, rays_d: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        device = rays_o.device
+        n_rays = rays_o.size(0)
+
+        f = lambda x: torch.where(x < 0.5, 2 * x, 1 / (2 - 2 * x))
+        t_values = torch.linspace(0., 1.-(1./(self.n_samples+2)), self.n_samples+1, device=device)
+        t_values  = f(t_values ) * self.uniform_range + self.near
+        step_sizes = t_values[1:] - t_values[:-1]
+
+        t_values = torch.broadcast_to(t_values[:-1], (n_rays, self.n_samples))
+        step_sizes = torch.broadcast_to(step_sizes, (n_rays, self.n_samples))
+        return t_values, step_sizes
+
+
+@dataclass
+class RayMarcherAABB():
+    aabb: torch.Tensor
+    n_samples: int = 200
+    near: float = 0.
+    far: float = 1e5
+
+    def __call__(self, rays_o: torch.Tensor, rays_d: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        device = rays_o.device
+        eps = 1e-9
+
+        # Compute rays intersections with bounding box
+        # TODO: AABB device
+        aabb_distances = self.aabb.unsqueeze(1) - rays_o
+        aabb_intersections = aabb_distances / torch.where(rays_d == 0., rays_d + eps, rays_d)
+        t_min = torch.amax(torch.amin(aabb_intersections, dim=0), dim=1)
+        t_max = torch.amin(torch.amax(aabb_intersections, dim=0), dim=1)
+        t_min = torch.clamp(t_min, min=self.near, max=self.far)
+
+        # Compute samples along valid rays
+        step_size: float = torch.norm(self.aabb[1] - self.aabb[0]) / self.n_samples
+        steps = torch.arange(self.n_samples, dtype=torch.float, device=device) * step_size
+        t_values = t_min[:, None] + steps
+        step_sizes = torch.full_like(t_values, step_size)
+
+        return t_values, step_sizes
+
+RayMarcher = RayMarcherUnbounded | RayMarcherAABB
+
 
 class OccupancyGrid(torch.nn.Module):
     def __init__(self, size: List[int] | int, decay: float = 0.95):
@@ -87,11 +144,8 @@ class NerfRenderer(torch.nn.Module):
         feature_module: torch.nn.Module,
         sigma_decoder: torch.nn.Module,
         rgb_decoder: torch.nn.Module,
-        contraction: Callable[[torch.Tensor], torch.Tensor] = mip360_contract,
-        near: float = 0.,
-        scene_scale: float = 1.,
-        delta_min: float = 1e-4,
-        delta_max: float = 1e10,
+        contraction: Contraction,
+        ray_marcher: RayMarcher
     ):
         super().__init__()
         self.occupancy_grid = occupancy_grid
@@ -99,10 +153,7 @@ class NerfRenderer(torch.nn.Module):
         self.sigma_decoder = sigma_decoder
         self.rgb_decoder = rgb_decoder
         self.contraction = contraction
-        self.near = near
-        self.scene_scale = scene_scale
-        self.delta_min = delta_min
-        self.delta_max = delta_max
+        self.ray_marcher = ray_marcher
 
         assert hasattr(self.feature_module, "feature_dim"), "feature module requires a feature_dim attribute"
 
@@ -110,28 +161,24 @@ class NerfRenderer(torch.nn.Module):
         self,
         rays_o: torch.Tensor, # [n, 3]
         rays_d: torch.Tensor, # [n, 3]
-        n_samples: int = 333,
         opacity_threshold: float = 1e-2,
         early_termination_threshold: float = 1e-4
     ) -> Tuple[torch.Tensor, RenderingStats]:
         device = rays_o.device
         n_rays = rays_o.size(0)
-
+        n_samples = self.ray_marcher.n_samples
         stats = RenderingStats()
 
         # Generate samples along each ray
         # TODO : precompute and store t_values
-        t_values, distances = unbounded_stepping(self.near, self.scene_scale, n_samples, device)
-        # jitter samples along ray when training
-        t_values = t_values[None,:].expand(n_rays, -1) # expand to [n_rays, n_samples] so we can jitter differently for each ray
-        distances = distances[None,:].expand(n_rays, -1)
-        if self.training:
-            t_values = t_values + torch.rand_like(t_values) * distances
-
+        t_values, step_sizes = self.ray_marcher(rays_o, rays_d)
+        if self.training: # jitter samples along ray when training
+            t_values = t_values + torch.rand_like(t_values) * step_sizes # TODO: jittering can get samples out of AABB
         samples = rays_o[:,None,:] + rays_d[:,None,:] * t_values[...,None]
-        samples = self.contraction(samples)
+        samples, init_mask = self.contraction(samples)
 
-        mask : torch.Tensor = self.occupancy_grid(samples, threshold=opacity_threshold)
+        mask = init_mask if init_mask is not None else torch.ones((n_rays,n_samples), dtype=torch.bool, device=device)
+        mask &= self.occupancy_grid(samples, threshold=opacity_threshold)
         stats.skipped_opacity = 1. - mask.float().mean().item()
 
         samples_features = torch.zeros(n_rays, n_samples, cast(int, self.feature_module.feature_dim), device=device)
@@ -141,15 +188,15 @@ class NerfRenderer(torch.nn.Module):
         # compute features and density for remaining samples
         samples_features[mask] = self.feature_module(samples[mask])
         samples_sigmas[mask] = self.sigma_decoder(samples_features[mask]).squeeze()
- 
+
         # compute transmittance and alpha
-        alpha = -samples_sigmas * distances # not actually alpha
+        alpha = - samples_sigmas * step_sizes # not actually alpha
         transmittance = torch.exp(torch.cumsum(alpha, 1))[:, :-1]
         transmittance = torch.cat([torch.ones(n_rays,1).to(device), transmittance], dim=1) # shift transmittance to the right
         alpha = 1. - torch.exp(alpha)
         weights = transmittance * alpha
 
-        mask = mask & (transmittance > early_termination_threshold)
+        mask &= transmittance > early_termination_threshold
         stats.skipped_transmittance = 1. - mask.float().mean().item()
         stats.rendered_samples = mask.sum().item()
 

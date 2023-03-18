@@ -1,4 +1,4 @@
-#python train_vanilla.py --data data/lego --output data/output --method vanilla --steps 10000 --batch_size 4096 --eval_every 250 --eval_n 5 --occupancy_res 128
+#python train_vanilla.py --data data/lego --output data/output --method vanilla --batch_size 4096 --scene_type aabb
 import argparse
 from pathlib import Path
 from src.train import train_vanilla, VanillaTrainConfig
@@ -10,17 +10,20 @@ def get_config() -> VanillaTrainConfig:
     parser.add_argument('--data', type=str, required=True)
     parser.add_argument('--output', type=str, required=True)
     parser.add_argument('--method', type=str, required=True)
-    parser.add_argument('--steps', type=int)
-    parser.add_argument('--batch_size', type=int)
-    parser.add_argument('--eval_every', type=int)
-    parser.add_argument('--eval_n', type=int)
-    parser.add_argument('--occupancy_res', type=int)
+    parser.add_argument('--steps', type=int, default=30000)
+    parser.add_argument('--batch_size', type=int, default=2048)
+    parser.add_argument('--n_samples', type=int, default=250)
+    parser.add_argument('--eval_every', type=int, default=250)
+    parser.add_argument('--eval_n', type=int, default=1)
+    parser.add_argument('--occupancy_res', type=int, default=128)
+    parser.add_argument('--scene_type', type=str)
 
     args = parser.parse_args()
 
     train_rays = RaysDataset(parse_nerf_synthetic(Path(args.data), 'train'))
     train_images = ImagesDataset(parse_nerf_synthetic(Path(args.data), 'train'))
     test_images = ImagesDataset(parse_nerf_synthetic(Path(args.data), 'test'))
+
 
     return VanillaTrainConfig(
         train_rays,
@@ -30,9 +33,11 @@ def get_config() -> VanillaTrainConfig:
         args.method,
         args.steps,
         args.batch_size,
+        args.n_samples,
         args.eval_every,
         args.eval_n,
-        args.occupancy_res
+        args.occupancy_res,
+        args.scene_type
     )
 
 if __name__ == '__main__':

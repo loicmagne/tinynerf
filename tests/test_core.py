@@ -1,5 +1,5 @@
 import torch
-from src.core import OccupancyGrid, NerfRenderer, mip360_contract
+from src.core import OccupancyGrid, NerfRenderer, RayMarcherAABB, RayMarcherUnbounded, ContractionMip360, ContractionAABB
 from src.models import VanillaFeatureMLP, VanillaOpacityDecoder, VanillaColorDecoder
 
 def test_occupancy_grid():
@@ -56,6 +56,8 @@ def test_renderer_vanilla_nerf():
     feature_mlp = VanillaFeatureMLP(10, [256 for k in range(8)])
     opacity_decoder = VanillaOpacityDecoder(256)
     color_decoder = VanillaColorDecoder(4, 256, [128])
+    ray_marcher = RayMarcherUnbounded()
+    contraction = ContractionMip360()
     
     def occupancy_fn(t: torch.Tensor):
         features = feature_mlp(t)
@@ -66,11 +68,12 @@ def test_renderer_vanilla_nerf():
     occupancy_grid.update(occupancy_fn)
 
     renderer  = NerfRenderer(
-        occupancy_grid,
-        feature_mlp,
-        opacity_decoder,
-        color_decoder,
-        mip360_contract
+        occupancy_grid=occupancy_grid,
+        feature_module=feature_mlp,
+        sigma_decoder=opacity_decoder,
+        rgb_decoder=color_decoder,
+        contraction=contraction,
+        ray_marcher=ray_marcher
     )
 
     rays_o = torch.rand(100, 3)
@@ -79,3 +82,51 @@ def test_renderer_vanilla_nerf():
     rendered_rgb, _ = renderer(rays_o, rays_d)
 
     assert rendered_rgb.size() == (100, 3)
+
+def test_ray_marcher_unbounded():
+    n_rays = 100
+    n_samples = 1000
+    rays_o = torch.randn(n_rays, 3)
+    rays_d = torch.randn(n_rays, 3)
+    ray_marcher = RayMarcherUnbounded(n_samples=n_samples)
+
+    t_values, step_sizes = ray_marcher(rays_o, rays_d)
+
+    assert t_values.size() == (n_rays, n_samples)
+    assert step_sizes.size() == (n_rays, n_samples)
+    assert torch.all(t_values >= 0.)
+    assert torch.all(step_sizes >= 0.)
+    
+    contraction = ContractionMip360()
+    coords = rays_o[:,None,:] + rays_d[:,None,:] * t_values[...,None]
+    coords, mask = contraction(coords)
+
+    assert mask is None
+    assert torch.all(coords <= 1.)
+    assert torch.all(coords >= -1.)
+
+def test_ray_marcher_aabb():
+    n_rays = 100
+    n_samples = 1000
+    aabb = torch.tensor([[0.,0.,0.], [2.,2.,2.]])
+    rays_o = torch.randn(n_rays, 3)
+    rays_d = torch.randn(n_rays, 3)
+    ray_marcher = RayMarcherAABB(aabb=aabb, n_samples=n_samples)
+
+    t_values, step_sizes = ray_marcher(rays_o, rays_d)
+    
+    assert t_values.size() == (n_rays, n_samples)
+    assert step_sizes.size() == (n_rays, n_samples)
+    assert torch.all(t_values >= 0.)
+    assert torch.all(step_sizes >= 0.)
+    
+    contraction = ContractionAABB(aabb)
+    coords = rays_o[:,None,:] + rays_d[:,None,:] * t_values[...,None]
+    _, mask = contraction(coords)
+    print(mask.size())
+    print(coords.size())
+    print(coords[mask].size())
+    print((coords[mask] >= aabb[0]).size())
+    print((coords[mask] <= aabb[1]).size())
+    print((coords[mask] >= aabb[0]) & (coords[mask] <= aabb[1]))
+    assert torch.all((coords[mask] >= aabb[0]) & (coords[mask] <= aabb[1]))

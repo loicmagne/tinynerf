@@ -1,7 +1,7 @@
 from src.models import VanillaFeatureMLP, VanillaOpacityDecoder, VanillaColorDecoder
 from src.models import KPlanesFeatureField, KPlanesExplicitOpacityDecoder, KPlanesExplicitColorDecoder
 from src.data import ImagesDataset, RaysDataset
-from src.core import OccupancyGrid, NerfRenderer, mip360_contract, psnr
+from src.core import OccupancyGrid, NerfRenderer, RayMarcherAABB, RayMarcherUnbounded, ContractionAABB, ContractionMip360, RayMarcher, Contraction
 from dataclasses import dataclass, asdict
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -10,6 +10,9 @@ from PIL import Image
 from pathlib import Path
 import json
 import torch
+
+def psnr(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    return - 10. * torch.log10(torch.mean((x - y) ** 2))
 
 @dataclass
 class TrainMetrics:
@@ -31,9 +34,12 @@ class VanillaTrainConfig:
     method: str
     steps: int
     batch_size: int
+    n_samples: int
     eval_every: int
     eval_n : int
     occupancy_res: int
+    scene_type: str
+
 
 def train_vanilla(cfg: VanillaTrainConfig):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -43,6 +49,9 @@ def train_vanilla(cfg: VanillaTrainConfig):
     feature_module: torch.nn.Module
     sigma_decoder: torch.nn.Module
     rgb_decoder: torch.nn.Module
+    ray_marcher: RayMarcher
+    contraction: Contraction
+
 
     if cfg.method == 'vanilla':
         feature_module = VanillaFeatureMLP(10, [256 for k in range(8)])
@@ -56,6 +65,16 @@ def train_vanilla(cfg: VanillaTrainConfig):
         rgb_decoder = KPlanesExplicitColorDecoder(dim)
     else:
         raise NotImplementedError(f'Unknown method {cfg.method}.')
+    
+    if cfg.scene_type == 'unbounded':
+        ray_marcher = RayMarcherUnbounded(cfg.n_samples, 0.1, 1e5, uniform_range=cfg.train_rays.scene_scale)
+        contraction = ContractionMip360(order=float('inf'))
+    elif cfg.scene_type == 'aabb':
+        aabb = torch.tensor([[-1.5, -1.5, -1.5], [1.5, 1.5, 1.5]])
+        ray_marcher = RayMarcherAABB(aabb, cfg.n_samples, 0.1)
+        contraction = ContractionAABB(aabb)
+    else:
+        raise NotImplementedError(f'Unknown scene type {cfg.scene_type}.')
 
     occupancy_grid = OccupancyGrid(cfg.occupancy_res, 0.95)
 
@@ -64,9 +83,8 @@ def train_vanilla(cfg: VanillaTrainConfig):
         feature_module=feature_module,
         sigma_decoder=sigma_decoder,
         rgb_decoder=rgb_decoder,
-        contraction=mip360_contract,
-        near=0.1,
-        scene_scale=cfg.train_rays.scene_scale/2.,
+        contraction=contraction,
+        ray_marcher=ray_marcher
     ).to(device)
     optimizer = torch.optim.Adam(renderer.parameters(), lr=3e-4)
 
