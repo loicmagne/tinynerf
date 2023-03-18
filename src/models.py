@@ -72,7 +72,7 @@ class KPlanesFeaturePlane(torch.nn.Module):
         self,
         feature_dim: int = 8,
         resolution: Tuple[int, int] = (128, 128),
-        init: Callable = torch.nn.init.normal_
+        init: Callable = torch.nn.init.uniform_
     ):
         super().__init__()
         self.feature_dim = feature_dim
@@ -82,12 +82,13 @@ class KPlanesFeaturePlane(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: (..., 2)"""
         new_shape = [*x.size()[:-1],self.feature_dim]
-        return torch.nn.functional.grid_sample(
+        output = torch.nn.functional.grid_sample(
             self.plane,
             x.view(1,-1,1,2),
             mode='bilinear',
             align_corners=False 
-        ).squeeze().transpose(0,1).view(new_shape).contiguous()
+        )
+        return output.squeeze().transpose(0,1).view(new_shape).contiguous()
 
     def loss_tv(self) -> torch.Tensor:
         tv_x = torch.nn.functional.mse_loss(self.plane[:, :, 1:, :], self.plane[:, :, :-1, :])
@@ -128,8 +129,7 @@ class KPlanesFeatureField(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: (..., 3)
-        returns"""
-
+        returns (..., self.feature_dim)"""
         features = []
         for plane_scale in self.planes:
             current_scale_features = 1.

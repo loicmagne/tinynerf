@@ -5,13 +5,11 @@ from src.core import OccupancyGrid, NerfRenderer, mip360_contract, psnr
 from dataclasses import dataclass, asdict
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from typing import List, Dict, cast
+from typing import List, cast
 from PIL import Image
 from pathlib import Path
-from torch.utils.data import Dataset
 import json
 import torch
-import torch.amp as amp
 
 @dataclass
 class TrainMetrics:
@@ -59,7 +57,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
     else:
         raise NotImplementedError(f'Unknown method {cfg.method}.')
 
-    occupancy_grid = OccupancyGrid(cfg.occupancy_res, 1.)
+    occupancy_grid = OccupancyGrid(cfg.occupancy_res, 0.95)
 
     renderer = NerfRenderer(
         occupancy_grid=occupancy_grid,
@@ -67,8 +65,8 @@ def train_vanilla(cfg: VanillaTrainConfig):
         sigma_decoder=sigma_decoder,
         rgb_decoder=rgb_decoder,
         contraction=mip360_contract,
-        near=0.5,
-        scene_scale=cfg.train_rays.scene_scale,
+        near=0.1,
+        scene_scale=cfg.train_rays.scene_scale/2.,
     ).to(device)
     optimizer = torch.optim.Adam(renderer.parameters(), lr=3e-4)
 
@@ -122,6 +120,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
         train_metrics: List[TrainMetrics] = []
         test_metrics: List[TestMetrics] = []
         train_step = 0
+        loss_fn = torch.nn.MSELoss()
         with tqdm(total=cfg.steps) as pbar:
             while True:
                 for batch in train_loader:
@@ -133,15 +132,15 @@ def train_vanilla(cfg: VanillaTrainConfig):
                     rays_d = batch['rays_d'].to(device)
                     rgbs = batch['rgbs'].to(device)
 
-                    if train_step % 32 == 0:
+                    if train_step % 16 == 0 or train_step < 256:
                         occupancy_grid.update(lambda t: renderer.sigma_decoder(renderer.feature_module(t)))
 
                     rendered_rgbs, stats = renderer(rays_o, rays_d)
-                    loss = torch.mean((rendered_rgbs - rgbs)**2)
+                    loss = loss_fn(rendered_rgbs,rgbs)
 
-                    if cfg.method == 'kplanes' and False:
-                        loss += renderer.feature_module.loss_tv() * 1. # type: ignore
-                        loss += renderer.feature_module.loss_l1() * 1e-3 # type: ignore
+                    if cfg.method == 'kplanes':
+                        loss += renderer.feature_module.loss_tv() * 0.0001 # type: ignore
+                        # loss += renderer.feature_module.loss_l1() * 1e-3 # type: ignore
 
                     optimizer.zero_grad()
                     loss.backward()
@@ -153,7 +152,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
                     pbar.set_postfix(loss=train_loss, occupancy=occupancy, **asdict(stats))
 
                     if train_step % cfg.eval_every == 0 and train_step > 0:
-                        train_eval(train_step)
+                        # train_eval(train_step)
                         metrics = test_eval(train_step)
                         test_metrics.extend(metrics)
 

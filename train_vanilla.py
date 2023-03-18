@@ -36,4 +36,13 @@ def get_config() -> VanillaTrainConfig:
     )
 
 if __name__ == '__main__':
+    import torch
+    import numpy as np
+    import random
+    import os
+    SEED = int(os.environ.get('SEED', 0))
+    torch.manual_seed(SEED)
+    np.random.seed(SEED)
+    random.seed(SEED)
+
     train_vanilla(get_config())

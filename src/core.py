@@ -23,7 +23,7 @@ import torch
 
 def mip360_contract(coords: torch.Tensor) -> torch.Tensor:
     """Scene contraction from Mip-NeRF 360 https://arxiv.org/abs/2111.12077"""
-    norm = torch.norm(coords, dim=-1, keepdim=True) # type: ignore 
+    norm = torch.norm(coords, p=float('inf'), dim=-1, keepdim=True) # type: ignore 
     return torch.where(norm <= 1., coords, (2. - 1./norm) * coords / norm) / 2.
 
 def unbounded_stepping(near: float, uniform_range: float, n_samples: int, device: torch.device):
@@ -76,9 +76,9 @@ class OccupancyGrid(torch.nn.Module):
 
 @dataclass
 class RenderingStats:
-    total_samples: int = 0
     skipped_opacity: float = 0.
     skipped_transmittance: float = 0.
+    rendered_samples: float = 0
 
 class NerfRenderer(torch.nn.Module):
     def __init__(
@@ -110,7 +110,7 @@ class NerfRenderer(torch.nn.Module):
         self,
         rays_o: torch.Tensor, # [n, 3]
         rays_d: torch.Tensor, # [n, 3]
-        n_samples: int = 250,
+        n_samples: int = 333,
         opacity_threshold: float = 1e-2,
         early_termination_threshold: float = 1e-4
     ) -> Tuple[torch.Tensor, RenderingStats]:
@@ -118,7 +118,6 @@ class NerfRenderer(torch.nn.Module):
         n_rays = rays_o.size(0)
 
         stats = RenderingStats()
-        stats.total_samples = n_rays * n_samples
 
         # Generate samples along each ray
         # TODO : precompute and store t_values
@@ -152,6 +151,7 @@ class NerfRenderer(torch.nn.Module):
 
         mask = mask & (transmittance > early_termination_threshold)
         stats.skipped_transmittance = 1. - mask.float().mean().item()
+        stats.rendered_samples = mask.sum().item()
 
         # compute rgb for remaining samples
         samples_rgbs[mask] = self.rgb_decoder(
