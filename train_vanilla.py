@@ -12,8 +12,8 @@ def get_config() -> VanillaTrainConfig:
     parser.add_argument('--method', type=str, required=True)
     parser.add_argument('--steps', type=int, default=30000)
     parser.add_argument('--batch_size', type=int, default=2048)
-    parser.add_argument('--n_samples', type=int, default=250)
-    parser.add_argument('--eval_every', type=int, default=250)
+    parser.add_argument('--n_samples', type=int, default=400)
+    parser.add_argument('--eval_every', type=int, default=500)
     parser.add_argument('--eval_n', type=int, default=1)
     parser.add_argument('--occupancy_res', type=int, default=128)
     parser.add_argument('--scene_type', type=str)
@@ -21,13 +21,10 @@ def get_config() -> VanillaTrainConfig:
     args = parser.parse_args()
 
     train_rays = RaysDataset(parse_nerf_synthetic(Path(args.data), 'train'))
-    train_images = ImagesDataset(parse_nerf_synthetic(Path(args.data), 'train'))
     test_images = ImagesDataset(parse_nerf_synthetic(Path(args.data), 'test'))
-
 
     return VanillaTrainConfig(
         train_rays,
-        train_images,
         test_images,
         Path(args.output),
         args.method,
@@ -45,9 +42,11 @@ if __name__ == '__main__':
     import numpy as np
     import random
     import os
+
     SEED = int(os.environ.get('SEED', 0))
-    torch.manual_seed(SEED)
-    np.random.seed(SEED)
-    random.seed(SEED)
+    if SEED != 0:
+        torch.manual_seed(SEED)
+        np.random.seed(SEED)
+        random.seed(SEED)
 
     train_vanilla(get_config())

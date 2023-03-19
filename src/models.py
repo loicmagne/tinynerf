@@ -173,16 +173,19 @@ class KPlanesExplicitColorDecoder(torch.nn.Module):
         super().__init__()
         self.pe = PositionalEncoding(4)
         self.feature_dim = feature_dim
-        in_dim = feature_dim + n_freqs * 2 * 3
+        in_dim = feature_dim + n_freqs * 2 * 3 + 3
         self.net = torch.nn.Sequential(
             torch.nn.Linear(in_dim, hidden_dim),
+            torch.nn.ReLU(),
             torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ReLU(),
             torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ReLU(),
             torch.nn.Linear(hidden_dim, 3 * feature_dim),
         )
 
     def forward(self, features: torch.Tensor, rays_d: torch.Tensor) -> torch.Tensor:
-        x = torch.cat([self.pe(rays_d), features], -1)
+        x = torch.cat([self.pe(rays_d), rays_d, features], -1)
         x = self.net(x).view(-1, 3, self.feature_dim)
         output = torch.sum(features.unsqueeze(-2) * x, -1)
         return torch.sigmoid(output)

@@ -3,7 +3,7 @@ from src.core import OccupancyGrid, NerfRenderer, RayMarcherAABB, RayMarcherUnbo
 from src.models import VanillaFeatureMLP, VanillaOpacityDecoder, VanillaColorDecoder
 
 def test_occupancy_grid():
-    grid = OccupancyGrid(128)
+    grid = OccupancyGrid(128, 1/1024.)
     grid.grid[:,:,64:] = 0.
 
     # about 1/2 of the occupancies should be set
@@ -47,7 +47,7 @@ def test_occupancy_grid_update():
         opacity = opacity_decoder(features)
         return opacity
 
-    occupancy_grid = OccupancyGrid(32)
+    occupancy_grid = OccupancyGrid(32, 1./1024.)
     occupancy_grid.update(sigma_fn)
     assert occupancy_grid.grid.sum().item() <= occupancy_grid.grid.numel()
 
@@ -64,7 +64,7 @@ def test_renderer_vanilla_nerf():
         opacity = opacity_decoder(features)
         return opacity
 
-    occupancy_grid = OccupancyGrid(64)
+    occupancy_grid = OccupancyGrid(64, 1/1024.)
     occupancy_grid.update(occupancy_fn)
 
     renderer  = NerfRenderer(

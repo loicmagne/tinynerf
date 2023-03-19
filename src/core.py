@@ -19,6 +19,7 @@ finally we compute rgbs for remaining samples, and we can accumulate to compute 
 
 from typing import Callable, Tuple, List, cast
 from dataclasses import dataclass
+from functools import cached_property
 import torch
 
 
@@ -26,6 +27,7 @@ import torch
 class ContractionMip360():
     order : float | int = float('inf')
 
+    @torch.no_grad()
     def __call__(self, coords: torch.Tensor) -> Tuple[torch.Tensor, None]:
         """Scene contraction from Mip-NeRF 360 https://arxiv.org/abs/2111.12077"""
         norm = torch.norm(coords, p=self.order, dim=-1, keepdim=True) # type: ignore 
@@ -36,6 +38,7 @@ class ContractionMip360():
 class ContractionAABB():
     aabb: torch.Tensor # [2,3]
 
+    @torch.no_grad()
     def __call__(self, coords: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Contract coords inside aabb to [-1,1], aabb.shape = [2,3]"""
         mask = torch.all((coords >= self.aabb[0]) & (coords <= self.aabb[1]), dim=-1)
@@ -51,6 +54,11 @@ class RayMarcherUnbounded():
     far: float = 1e5
     uniform_range: float = 1.
 
+    @cached_property
+    def step_size(self) -> float:
+        return self.uniform_range / self.n_samples
+
+    @torch.no_grad()
     def __call__(self, rays_o: torch.Tensor, rays_d: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         device = rays_o.device
         n_rays = rays_o.size(0)
@@ -72,17 +80,21 @@ class RayMarcherAABB():
     near: float = 0.
     far: float = 1e5
 
+    @cached_property
+    def step_size(self) -> float:
+        return torch.norm(self.aabb[1] - self.aabb[0]) / self.n_samples
+
+    @torch.no_grad()
     def __call__(self, rays_o: torch.Tensor, rays_d: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         device = rays_o.device
         eps = 1e-9
 
         # Compute rays intersections with bounding box
-        # TODO: AABB device
         aabb_distances = self.aabb.unsqueeze(1) - rays_o
         aabb_intersections = aabb_distances / torch.where(rays_d == 0., rays_d + eps, rays_d)
         t_min = torch.amax(torch.amin(aabb_intersections, dim=0), dim=1)
         t_max = torch.amin(torch.amax(aabb_intersections, dim=0), dim=1)
-        t_min = torch.clamp(t_min, min=self.near, max=self.far)
+        t_min = torch.clamp(t_min, min=self.near, max=self.far) # !!!!!!!!!!!!
 
         # Compute samples along valid rays
         step_size: float = torch.norm(self.aabb[1] - self.aabb[0]) / self.n_samples
@@ -96,10 +108,18 @@ RayMarcher = RayMarcherUnbounded | RayMarcherAABB
 
 
 class OccupancyGrid(torch.nn.Module):
-    def __init__(self, size: List[int] | int, decay: float = 0.95):
+    def __init__(
+        self,
+        size: List[int] | int,
+        step_size: float,
+        threshold: float = 0.01,
+        decay: float = 0.95,
+    ):
         super().__init__()
         size = size if isinstance(size, List) else [size, size, size]
         self.decay = decay
+        self.step_size = step_size
+        self.threshold = threshold
     
         self.grid: torch.Tensor
         self.register_buffer("grid", torch.ones(size, dtype=torch.float))
@@ -111,16 +131,20 @@ class OccupancyGrid(torch.nn.Module):
         self.size = torch.tensor(size, dtype=torch.float)
 
     @torch.no_grad()
+    def occupancy(self) -> float:
+        return (self.grid > self.threshold).sum().item() / self.grid.numel()
+
+    @torch.no_grad()
     def update(self, sigma_fn: Callable[[torch.Tensor], torch.Tensor]):
         batch_shape = self.grid[0].size()
         for i in range(self.grid.size(0)):
-            coords = (self.coords[i] + torch.rand_like(self.coords[i])) / self.size # jitter inside voxel 
+            coords = -1. + 2. * (self.coords[i] + torch.rand_like(self.coords[i])) / self.size # jitter inside voxel 
             coords = coords.view(-1, 3).contiguous().to(self.grid.device)
-            alpha = (1. - torch.exp(-sigma_fn(coords) * 1.)).view(batch_shape) # TODO: add step size
+            alpha = (1. - torch.exp(-sigma_fn(coords) * self.step_size)).view(batch_shape) # TODO: add step size
             self.grid[i] = torch.maximum(self.grid[i] * self.decay, alpha)
 
     @torch.no_grad()
-    def forward(self, coords: torch.Tensor, threshold: float = 0.01) -> torch.Tensor:
+    def forward(self, coords: torch.Tensor) -> torch.Tensor:
         """"coords: [..., 3], normalized [-1,1] coordinates"""
         new_shape = coords.shape[:-1]
         values = torch.nn.functional.grid_sample(
@@ -129,13 +153,11 @@ class OccupancyGrid(torch.nn.Module):
             coords.view(1,-1,1,1,3),
             mode="bilinear", align_corners=False # TODO: align_corners=True?
         ).view(new_shape).contiguous()
-        return values > threshold
+        return values > self.threshold
 
 @dataclass
 class RenderingStats:
-    skipped_opacity: float = 0.
-    skipped_transmittance: float = 0.
-    rendered_samples: float = 0
+    skipped_samples: List[float]
 
 class NerfRenderer(torch.nn.Module):
     def __init__(
@@ -145,7 +167,8 @@ class NerfRenderer(torch.nn.Module):
         sigma_decoder: torch.nn.Module,
         rgb_decoder: torch.nn.Module,
         contraction: Contraction,
-        ray_marcher: RayMarcher
+        ray_marcher: RayMarcher,
+        bg_color: torch.Tensor | None = None,
     ):
         super().__init__()
         self.occupancy_grid = occupancy_grid
@@ -154,6 +177,7 @@ class NerfRenderer(torch.nn.Module):
         self.rgb_decoder = rgb_decoder
         self.contraction = contraction
         self.ray_marcher = ray_marcher
+        self.bg_color = bg_color
 
         assert hasattr(self.feature_module, "feature_dim"), "feature module requires a feature_dim attribute"
 
@@ -161,13 +185,12 @@ class NerfRenderer(torch.nn.Module):
         self,
         rays_o: torch.Tensor, # [n, 3]
         rays_d: torch.Tensor, # [n, 3]
-        opacity_threshold: float = 1e-2,
-        early_termination_threshold: float = 1e-4
+        early_termination_threshold: float = 1e-4,
     ) -> Tuple[torch.Tensor, RenderingStats]:
         device = rays_o.device
         n_rays = rays_o.size(0)
         n_samples = self.ray_marcher.n_samples
-        stats = RenderingStats()
+        stats = RenderingStats(skipped_samples=[])
 
         # Generate samples along each ray
         # TODO : precompute and store t_values
@@ -176,10 +199,11 @@ class NerfRenderer(torch.nn.Module):
             t_values = t_values + torch.rand_like(t_values) * step_sizes # TODO: jittering can get samples out of AABB
         samples = rays_o[:,None,:] + rays_d[:,None,:] * t_values[...,None]
         samples, init_mask = self.contraction(samples)
-
         mask = init_mask if init_mask is not None else torch.ones((n_rays,n_samples), dtype=torch.bool, device=device)
-        mask &= self.occupancy_grid(samples, threshold=opacity_threshold)
-        stats.skipped_opacity = 1. - mask.float().mean().item()
+        stats.skipped_samples.append(1. - mask.float().mean().item())
+
+        mask = mask & self.occupancy_grid(samples)
+        stats.skipped_samples.append(1. - mask.float().mean().item())
 
         samples_features = torch.zeros(n_rays, n_samples, cast(int, self.feature_module.feature_dim), device=device)
         samples_sigmas = torch.zeros(n_rays, n_samples, device=device)
@@ -196,9 +220,8 @@ class NerfRenderer(torch.nn.Module):
         alpha = 1. - torch.exp(alpha)
         weights = transmittance * alpha
 
-        mask &= transmittance > early_termination_threshold
-        stats.skipped_transmittance = 1. - mask.float().mean().item()
-        stats.rendered_samples = mask.sum().item()
+        mask = mask & (transmittance > early_termination_threshold)
+        stats.skipped_samples.append(1. - mask.float().mean().item())
 
         # compute rgb for remaining samples
         samples_rgbs[mask] = self.rgb_decoder(
@@ -207,5 +230,10 @@ class NerfRenderer(torch.nn.Module):
         ) * weights[mask][:, None]
 
         rendered_rgb = samples_rgbs.sum(1) # accumulate rgb
+
+        if self.bg_color is not None:
+            opacities = weights.sum(1, keepdim=True) # [n_rays, 1]
+            # TODO: learn a background color ?
+            rendered_rgb = rendered_rgb + self.bg_color.to(device) * (1 - opacities)
 
         return rendered_rgb, stats

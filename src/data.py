@@ -25,11 +25,11 @@ class NerfData:
     you want to generate the images for certain poses. Currently supports variable
     intrinsics images, will see if it's ever useful
     """
-    
     cameras: torch.Tensor # [n_images, 4, 4] camera matrices
     intrinsics: Intrinsics | List[Intrinsics]
     imgs: Optional[List[torch.Tensor]] = None # [n_images], [h, w, 3] list of RGB HWC [0,1] images
-    
+    bg_color: torch.Tensor | None = None # normalized [0,1] background rgb color
+
     @property
     def n_img(self):
         return len(self.cameras)
@@ -81,6 +81,7 @@ class ImagesDataset(Dataset):
         self.rays_o, self.rays_d = data.generate_rays() # [n_images][h, w, 3]
         self.rgbs = data.imgs # [n_images][h, w, 3], None when doing novel view synthesis
         self.scene_scale = data.scene_scale()
+        self.bg_color = data.bg_color
 
     def __len__(self):
         return len(self.rays_o)
@@ -101,6 +102,7 @@ class RaysDataset(Dataset):
         self.rays_d = torch.cat([t.view(-1, 3) for t in rays_d]) # [n_rays, 3]
         self.rgbs = torch.cat([t.view(-1, 3) for t in data.imgs]) if data.imgs is not None else None # [n_rays, 3]
         self.scene_scale = data.scene_scale()
+        self.bg_color = data.bg_color
 
     def __len__(self):
         return self.rays_o.size(0)
@@ -114,11 +116,18 @@ class RaysDataset(Dataset):
             data["rgbs"] = self.rgbs[idx]
         return data
 
-def parse_nerf_synthetic(scene_path: Path, split: str = "train") -> NerfData:
-    with open(scene_path / f"transforms_{split}.json") as f_in:
-        data = json.load(f_in)
+def parse_nerf_synthetic(
+    scene_path: Path,
+    split: str = "train",
+    bg_color: Tuple[int,int,int] = (255, 255, 255)
+) -> NerfData:
+    bg_color_tensor = torch.tensor(bg_color, dtype=torch.float) / 255.
     imgs, cameras = [], []
     intrinsics = None
+
+    with open(scene_path / f"transforms_{split}.json") as f_in:
+        data = json.load(f_in)
+
     for frame in data['frames']:
         image_path = (scene_path / frame['file_path']).with_suffix('.png')
         with Image.open(image_path) as img:
@@ -129,15 +138,17 @@ def parse_nerf_synthetic(scene_path: Path, split: str = "train") -> NerfData:
                 intrinsics = Intrinsics(focal, focal, w/2., h/2., w, h)
 
             if img.mode == "RGBA":
-                bg = Image.new('RGBA', img.size, (255, 255, 255))
+                bg = Image.new('RGBA', img.size, bg_color)
                 img = Image.alpha_composite(bg, img).convert('RGB')
             torch_img = torch.from_numpy(np.array(img, dtype=np.single)) # TODO : copy?
             torch_img /= 255.
             imgs.append(torch_img)
         cameras.append(frame['transform_matrix'])
+
     assert intrinsics is not None
     return NerfData(
         imgs=imgs,
         cameras=torch.tensor(cameras, dtype=torch.float),
-        intrinsics=intrinsics
+        intrinsics=intrinsics,
+        bg_color=bg_color_tensor
     )

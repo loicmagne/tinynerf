@@ -28,7 +28,6 @@ class TestMetrics:
 @dataclass
 class VanillaTrainConfig:
     train_rays: RaysDataset
-    train_images: ImagesDataset
     test_images: ImagesDataset
     output: Path
     method: str
@@ -52,7 +51,6 @@ def train_vanilla(cfg: VanillaTrainConfig):
     ray_marcher: RayMarcher
     contraction: Contraction
 
-
     if cfg.method == 'vanilla':
         feature_module = VanillaFeatureMLP(10, [256 for k in range(8)])
         dim = feature_module.feature_dim
@@ -70,13 +68,18 @@ def train_vanilla(cfg: VanillaTrainConfig):
         ray_marcher = RayMarcherUnbounded(cfg.n_samples, 0.1, 1e5, uniform_range=cfg.train_rays.scene_scale)
         contraction = ContractionMip360(order=float('inf'))
     elif cfg.scene_type == 'aabb':
-        aabb = torch.tensor([[-1.5, -1.5, -1.5], [1.5, 1.5, 1.5]])
+        aabb = torch.tensor([[-1.5, -1.5, -1.5], [1.5, 1.5, 1.5]]).to(device)
         ray_marcher = RayMarcherAABB(aabb, cfg.n_samples, 0.1)
         contraction = ContractionAABB(aabb)
     else:
         raise NotImplementedError(f'Unknown scene type {cfg.scene_type}.')
 
-    occupancy_grid = OccupancyGrid(cfg.occupancy_res, 0.95)
+    occupancy_grid = OccupancyGrid(
+        size=cfg.occupancy_res,
+        step_size=ray_marcher.step_size,
+        threshold=0.01,
+        decay=0.99
+    )
 
     renderer = NerfRenderer(
         occupancy_grid=occupancy_grid,
@@ -84,10 +87,23 @@ def train_vanilla(cfg: VanillaTrainConfig):
         sigma_decoder=sigma_decoder,
         rgb_decoder=rgb_decoder,
         contraction=contraction,
-        ray_marcher=ray_marcher
+        ray_marcher=ray_marcher,
+        bg_color=cfg.train_rays.bg_color
     ).to(device)
-    optimizer = torch.optim.Adam(renderer.parameters(), lr=3e-4)
-
+    optimizer = torch.optim.Adam(renderer.parameters(), lr=1e-2)
+    scheduler = torch.optim.lr_scheduler.ChainedScheduler([
+        torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=100),
+        torch.optim.lr_scheduler.MultiStepLR(
+            optimizer,
+            milestones=[
+                cfg.steps // 2,
+                cfg.steps * 3 // 4,
+                cfg.steps * 5 // 6,
+                cfg.steps * 9 // 10,
+            ],
+            gamma=0.33,
+        ),
+    ])
     def eval(img_dataset: ImagesDataset, n: int, name: str):
         count: int = 0
         def closure(step: int):
@@ -131,7 +147,6 @@ def train_vanilla(cfg: VanillaTrainConfig):
             return metrics_acc
         return closure
     
-    train_eval = eval(cfg.train_images, cfg.eval_n, 'train')
     test_eval = eval(cfg.test_images, cfg.eval_n, 'test')
 
     def loop() -> tuple[list[TrainMetrics], list[TestMetrics]]: 
@@ -146,28 +161,33 @@ def train_vanilla(cfg: VanillaTrainConfig):
                         return train_metrics, test_metrics
                     renderer.train()
 
+                    if train_step % 16 == 0 or train_step < 1024:
+                        occupancy_grid.update(lambda t: renderer.sigma_decoder(renderer.feature_module(t)))
+
                     rays_o = batch['rays_o'].to(device)
                     rays_d = batch['rays_d'].to(device)
                     rgbs = batch['rgbs'].to(device)
-
-                    if train_step % 16 == 0 or train_step < 256:
-                        occupancy_grid.update(lambda t: renderer.sigma_decoder(renderer.feature_module(t)))
 
                     rendered_rgbs, stats = renderer(rays_o, rays_d)
                     loss = loss_fn(rendered_rgbs,rgbs)
 
                     if cfg.method == 'kplanes':
                         loss += renderer.feature_module.loss_tv() * 0.0001 # type: ignore
-                        # loss += renderer.feature_module.loss_l1() * 1e-3 # type: ignore
+                        loss += renderer.feature_module.loss_l1() * 1e-3 # type: ignore
 
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
+                    scheduler.step()
 
                     train_loss = loss.detach().cpu().item()
-                    occupancy = occupancy_grid.grid.sum().item() / occupancy_grid.grid.numel()
+                    occupancy = occupancy_grid.occupancy()
                     train_metrics.append(TrainMetrics(train_loss, occupancy))
-                    pbar.set_postfix(loss=train_loss, occupancy=occupancy, **asdict(stats))
+                    pbar.set_postfix(
+                        loss=train_loss,
+                        occupancy=occupancy,
+                        skipped=list(map(lambda x: f"{100*x:.1f}",stats.skipped_samples))
+                    )
 
                     if train_step % cfg.eval_every == 0 and train_step > 0:
                         # train_eval(train_step)
