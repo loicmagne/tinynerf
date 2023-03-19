@@ -21,10 +21,12 @@ def get_config() -> VanillaTrainConfig:
     args = parser.parse_args()
 
     train_rays = RaysDataset(parse_nerf_synthetic(Path(args.data), 'train'))
+    train_images = ImagesDataset(parse_nerf_synthetic(Path(args.data), 'train'))
     test_images = ImagesDataset(parse_nerf_synthetic(Path(args.data), 'test'))
 
     return VanillaTrainConfig(
         train_rays,
+        train_images,
         test_images,
         Path(args.output),
         args.method,

@@ -28,6 +28,7 @@ class TestMetrics:
 @dataclass
 class VanillaTrainConfig:
     train_rays: RaysDataset
+    train_images: ImagesDataset
     test_images: ImagesDataset
     output: Path
     method: str
@@ -42,6 +43,17 @@ class VanillaTrainConfig:
 
 def train_vanilla(cfg: VanillaTrainConfig):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Compute bunch of constant given we target 30k iter @ 4096 batch size
+    bs_ratio = 4096 / cfg.batch_size
+    steps = 30000 * bs_ratio
+    occupancy_grid_warmup = 256 * bs_ratio
+    occupancy_grid_update = 16 * bs_ratio
+    occupancy_grid_update_steps = [1024, 2048, 4096, 8192]
+
+    tv_reg_alpha = 0.0001
+    l1_reg_alpha = 1e-3
+
 
     train_loader = DataLoader(cfg.train_rays, cfg.batch_size, shuffle=True)
 
@@ -78,7 +90,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
         size=cfg.occupancy_res,
         step_size=ray_marcher.step_size,
         threshold=0.01,
-        decay=0.99
+        decay=0.95
     )
 
     renderer = NerfRenderer(
@@ -104,7 +116,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
             gamma=0.33,
         ),
     ])
-    def eval(img_dataset: ImagesDataset, n: int, name: str):
+    def eval_step(img_dataset: ImagesDataset, n: int, name: str):
         count: int = 0
         def closure(step: int):
             nonlocal count
@@ -147,21 +159,23 @@ def train_vanilla(cfg: VanillaTrainConfig):
             return metrics_acc
         return closure
     
-    test_eval = eval(cfg.test_images, cfg.eval_n, 'test')
+    test_eval = eval_step(cfg.test_images, cfg.eval_n, 'test')
+    # train_eval = eval_step(cfg.train_images, cfg.eval_n, 'train')
+
 
     def loop() -> tuple[list[TrainMetrics], list[TestMetrics]]: 
         train_metrics: List[TrainMetrics] = []
         test_metrics: List[TestMetrics] = []
         train_step = 0
         loss_fn = torch.nn.MSELoss()
-        with tqdm(total=cfg.steps) as pbar:
+        with tqdm(total=steps) as pbar:
             while True:
                 for batch in train_loader:
                     if train_step >= cfg.steps:
                         return train_metrics, test_metrics
                     renderer.train()
 
-                    if train_step % 16 == 0 or train_step < 1024:
+                    if train_step % occupancy_grid_update == 0 or train_step < occupancy_grid_warmup: # train_step in occupancy_grid_update_steps:
                         occupancy_grid.update(lambda t: renderer.sigma_decoder(renderer.feature_module(t)))
 
                     rays_o = batch['rays_o'].to(device)
@@ -172,8 +186,8 @@ def train_vanilla(cfg: VanillaTrainConfig):
                     loss = loss_fn(rendered_rgbs,rgbs)
 
                     if cfg.method == 'kplanes':
-                        loss += renderer.feature_module.loss_tv() * 0.0001 # type: ignore
-                        loss += renderer.feature_module.loss_l1() * 1e-3 # type: ignore
+                        loss += renderer.feature_module.loss_tv() * tv_reg_alpha # type: ignore
+                        loss += renderer.feature_module.loss_l1() * l1_reg_alpha # type: ignore
 
                     optimizer.zero_grad()
                     loss.backward()

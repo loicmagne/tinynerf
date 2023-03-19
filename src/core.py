@@ -122,13 +122,14 @@ class OccupancyGrid(torch.nn.Module):
         self.threshold = threshold
     
         self.grid: torch.Tensor
-        self.register_buffer("grid", torch.ones(size, dtype=torch.float))
+        self.register_buffer("grid", torch.zeros(size, dtype=torch.float))
         self.coords = torch.stack(torch.meshgrid([
             torch.arange(size[0], dtype=torch.float),
             torch.arange(size[1], dtype=torch.float),
             torch.arange(size[2], dtype=torch.float)
         ], indexing="ij"), -1)
         self.size = torch.tensor(size, dtype=torch.float)
+        self.mean = 1.
 
     @torch.no_grad()
     def occupancy(self) -> float:
@@ -142,6 +143,7 @@ class OccupancyGrid(torch.nn.Module):
             coords = coords.view(-1, 3).contiguous().to(self.grid.device)
             alpha = (1. - torch.exp(-sigma_fn(coords) * self.step_size)).view(batch_shape) # TODO: add step size
             self.grid[i] = torch.maximum(self.grid[i] * self.decay, alpha)
+        self.mean = self.grid.mean().item()
 
     @torch.no_grad()
     def forward(self, coords: torch.Tensor) -> torch.Tensor:
@@ -153,7 +155,7 @@ class OccupancyGrid(torch.nn.Module):
             coords.view(1,-1,1,1,3),
             mode="bilinear", align_corners=False # TODO: align_corners=True?
         ).view(new_shape).contiguous()
-        return values > self.threshold
+        return values > min(self.threshold, self.mean)
 
 @dataclass
 class RenderingStats:
