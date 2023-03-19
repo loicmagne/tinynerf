@@ -46,10 +46,14 @@ def train_vanilla(cfg: VanillaTrainConfig):
 
     # Compute bunch of constant given we target 30k iter @ 4096 batch size
     bs_ratio = 4096 / cfg.batch_size
-    steps = 30000 * bs_ratio
+
+    steps = int(30000 * bs_ratio)
+
     occupancy_grid_warmup = 256 * bs_ratio
     occupancy_grid_update = 16 * bs_ratio
     occupancy_grid_update_steps = [1024, 2048, 4096, 8192]
+
+    lr_warmup = int(100 * bs_ratio)
 
     tv_reg_alpha = 0.0001
     l1_reg_alpha = 1e-3
@@ -104,14 +108,14 @@ def train_vanilla(cfg: VanillaTrainConfig):
     ).to(device)
     optimizer = torch.optim.Adam(renderer.parameters(), lr=1e-2)
     scheduler = torch.optim.lr_scheduler.ChainedScheduler([
-        torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=100),
+        torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=lr_warmup),
         torch.optim.lr_scheduler.MultiStepLR(
             optimizer,
             milestones=[
-                cfg.steps // 2,
-                cfg.steps * 3 // 4,
-                cfg.steps * 5 // 6,
-                cfg.steps * 9 // 10,
+                steps // 2,
+                steps * 3 // 4,
+                steps * 5 // 6,
+                steps * 9 // 10,
             ],
             gamma=0.33,
         ),
@@ -171,7 +175,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
         with tqdm(total=steps) as pbar:
             while True:
                 for batch in train_loader:
-                    if train_step >= cfg.steps:
+                    if train_step >= steps:
                         return train_metrics, test_metrics
                     renderer.train()
 
