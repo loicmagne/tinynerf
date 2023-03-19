@@ -169,13 +169,15 @@ class KPlanesExplicitOpacityDecoder(torch.nn.Module):
         return self.activation(x)
 
 class KPlanesExplicitColorDecoder(torch.nn.Module):
-    def __init__(self, feature_dim, n_freqs = 4, hidden_dim = 128):
+    def __init__(self, feature_dim, n_freqs = 8, hidden_dim = 128):
         super().__init__()
-        self.pe = PositionalEncoding(4)
+        self.pe = PositionalEncoding(n_freqs)
         self.feature_dim = feature_dim
         in_dim = feature_dim + n_freqs * 2 * 3 + 3
         self.net = torch.nn.Sequential(
             torch.nn.Linear(in_dim, hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
             torch.nn.ReLU(),
             torch.nn.Linear(hidden_dim, hidden_dim),
             torch.nn.ReLU(),
@@ -189,3 +191,40 @@ class KPlanesExplicitColorDecoder(torch.nn.Module):
         x = self.net(x).view(-1, 3, self.feature_dim)
         output = torch.sum(features.unsqueeze(-2) * x, -1)
         return torch.sigmoid(output)
+
+class KPlanesHybridOpacityDecoder(torch.nn.Module):
+    def __init__(self, feature_dim):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(feature_dim, 64),
+            torch.nn.ReLU(),
+            torch.nn.Linear(64,1)
+        )
+        self.activation = torch.nn.Softplus()
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.activation(self.net(features))
+
+
+class KPlanesHybridColorDecoder(torch.nn.Module):
+    def __init__(self, feature_dim, n_freqs = 8, hidden_dim = 64):
+        super().__init__()
+        self.pe = PositionalEncoding(n_freqs)
+        self.feature_dim = feature_dim
+        in_dim = feature_dim + n_freqs * 2 * 3 + 3
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(in_dim, hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, 3),
+            torch.nn.Sigmoid()
+        )
+
+    def forward(self, features: torch.Tensor, rays_d: torch.Tensor) -> torch.Tensor:
+        x = torch.cat([self.pe(rays_d), rays_d, features], -1)
+        return self.net(x)
