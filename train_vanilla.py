@@ -51,4 +51,11 @@ if __name__ == '__main__':
         np.random.seed(SEED)
         random.seed(SEED)
 
-    train_vanilla(get_config())
+    config = get_config()
+
+    id = len(list(filter(Path.is_dir, config.output.iterdir())))
+    experiment_name = f'{id}_{config.method}_{config.scene_type}_{config.n_samples}'
+    config.output = config.output / experiment_name
+    config.output.mkdir(parents=True, exist_ok=True)
+
+    train_vanilla(config)

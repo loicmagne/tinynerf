@@ -1,5 +1,6 @@
 from src.models import VanillaFeatureMLP, VanillaOpacityDecoder, VanillaColorDecoder
 from src.models import KPlanesFeatureField, KPlanesExplicitOpacityDecoder, KPlanesExplicitColorDecoder
+from src.models import KPlanesHybridOpacityDecoder, KPlanesHybridColorDecoder
 from src.data import ImagesDataset, RaysDataset
 from src.core import OccupancyGrid, NerfRenderer, RayMarcherAABB, RayMarcherUnbounded, ContractionAABB, ContractionMip360, RayMarcher, Contraction
 from dataclasses import dataclass, asdict
@@ -49,15 +50,14 @@ def train_vanilla(cfg: VanillaTrainConfig):
 
     steps = int(30000 * bs_ratio)
 
-    occupancy_grid_warmup = 256 * bs_ratio
-    occupancy_grid_update = 16 * bs_ratio
-    occupancy_grid_update_steps = [1024, 2048, 4096, 8192]
+    occupancy_grid_updates = int(16 * bs_ratio)
+    occupancy_grid_threshold = 0.01
+    occupancy_grid_decay = 0.5
 
-    lr_warmup = int(100 * bs_ratio)
-
+    lr_init = 1e-2
+    weight_decay = 1e-5
     tv_reg_alpha = 0.0001
     l1_reg_alpha = 1e-3
-
 
     train_loader = DataLoader(cfg.train_rays, cfg.batch_size, shuffle=True)
 
@@ -68,15 +68,15 @@ def train_vanilla(cfg: VanillaTrainConfig):
     contraction: Contraction
 
     if cfg.method == 'vanilla':
-        feature_module = VanillaFeatureMLP(10, [256 for k in range(8)])
+        feature_module = VanillaFeatureMLP(10, [256 for _ in range(8)])
         dim = feature_module.feature_dim
         sigma_decoder = VanillaOpacityDecoder(dim)
         rgb_decoder = VanillaColorDecoder(4, dim, [128])
     elif cfg.method == 'kplanes':
         feature_module = KPlanesFeatureField(32)
         dim = feature_module.feature_dim
-        sigma_decoder = KPlanesExplicitOpacityDecoder(dim)
-        rgb_decoder = KPlanesExplicitColorDecoder(dim)
+        sigma_decoder = KPlanesHybridOpacityDecoder(dim)
+        rgb_decoder = KPlanesHybridColorDecoder(dim)
     else:
         raise NotImplementedError(f'Unknown method {cfg.method}.')
     
@@ -93,8 +93,8 @@ def train_vanilla(cfg: VanillaTrainConfig):
     occupancy_grid = OccupancyGrid(
         size=cfg.occupancy_res,
         step_size=ray_marcher.step_size,
-        threshold=0.01,
-        decay=0.95
+        threshold=occupancy_grid_threshold,
+        decay=occupancy_grid_decay
     )
 
     renderer = NerfRenderer(
@@ -106,9 +106,15 @@ def train_vanilla(cfg: VanillaTrainConfig):
         ray_marcher=ray_marcher,
         bg_color=cfg.train_rays.bg_color
     ).to(device)
-    optimizer = torch.optim.Adam(renderer.parameters(), lr=1e-2)
+
+    optimizer = torch.optim.Adam(
+        renderer.parameters(),
+        lr=lr_init,
+        eps=1e-15,
+        weight_decay=weight_decay
+    )
+
     scheduler = torch.optim.lr_scheduler.ChainedScheduler([
-        torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=lr_warmup),
         torch.optim.lr_scheduler.MultiStepLR(
             optimizer,
             milestones=[
@@ -120,6 +126,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
             gamma=0.33,
         ),
     ])
+    scaler = torch.cuda.amp.GradScaler(2 ** 10) # type: ignore
     def eval_step(img_dataset: ImagesDataset, n: int, name: str):
         count: int = 0
         def closure(step: int):
@@ -128,7 +135,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
             metrics_acc = []
             with torch.no_grad():
                 metrics = TestMetrics()
-                for i in tqdm(range(n)):
+                for _ in tqdm(range(n)):
                     data = img_dataset[count % len(cast(ImagesDataset, img_dataset))]
                     img = data['rgbs']
                     rays_o = data['rays_o'].view(-1, 3)
@@ -179,7 +186,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
                         return train_metrics, test_metrics
                     renderer.train()
 
-                    if train_step % occupancy_grid_update == 0 or train_step < occupancy_grid_warmup: # train_step in occupancy_grid_update_steps:
+                    if train_step % occupancy_grid_updates == 0:
                         occupancy_grid.update(lambda t: renderer.sigma_decoder(renderer.feature_module(t)))
 
                     rays_o = batch['rays_o'].to(device)
@@ -194,7 +201,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
                         loss += renderer.feature_module.loss_l1() * l1_reg_alpha # type: ignore
 
                     optimizer.zero_grad()
-                    loss.backward()
+                    scaler.scale(loss).backward() # type: ignore
                     optimizer.step()
                     scheduler.step()
 
@@ -204,7 +211,8 @@ def train_vanilla(cfg: VanillaTrainConfig):
                     pbar.set_postfix(
                         loss=train_loss,
                         occupancy=occupancy,
-                        skipped=list(map(lambda x: f"{100*x:.1f}",stats.skipped_samples))
+                        skipped=list(map(lambda x: f"{100*x:.1f}",stats.skipped_samples)),
+                        rendered_samples= stats.rendered_samples
                     )
 
                     if train_step % cfg.eval_every == 0 and train_step > 0:

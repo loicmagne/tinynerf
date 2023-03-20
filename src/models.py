@@ -1,7 +1,28 @@
 import itertools
 import torch
+from torch.autograd import Function
+from torch.cuda.amp import custom_fwd, custom_bwd # type: ignore
 from typing import List, Tuple, Callable, cast
-from dataclasses import dataclass
+
+
+class TruncatedExponential(Function):  # pylint: disable=abstract-method
+    # Implementation from torch-ngp:
+    # https://github.com/ashawkey/torch-ngp/blob/93b08a0d4ec1cc6e69d85df7f0acdfb99603b628/activation.py
+    @staticmethod
+    @custom_fwd(cast_inputs=torch.float32)
+    def forward(ctx, x):  # pylint: disable=arguments-differ
+        ctx.save_for_backward(x)
+        return torch.exp(x)
+
+    @staticmethod
+    @custom_bwd
+    def backward(ctx, g):  # pylint: disable=arguments-differ
+        x = ctx.saved_tensors[0]
+        return g * torch.exp(torch.clamp(x, min=-15, max=15))
+
+
+trunc_exp: Callable = TruncatedExponential.apply
+
 
 """Vanilla NeRF"""
 
@@ -86,7 +107,7 @@ class KPlanesFeaturePlane(torch.nn.Module):
             self.plane,
             x.view(1,-1,1,2),
             mode='bilinear',
-            align_corners=False 
+            align_corners=True 
         )
         return output.squeeze().transpose(0,1).view(new_shape).contiguous()
 
@@ -162,7 +183,8 @@ class KPlanesExplicitOpacityDecoder(torch.nn.Module):
         self.net = torch.nn.Sequential(
             torch.nn.Linear(feature_dim, feature_dim),
         )
-        self.activation = torch.nn.Softplus()
+        # self.activation = torch.nn.Softplus()
+        self.activation = lambda x: trunc_exp(x - 1.)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         x = torch.sum(features * self.net(features), -1, keepdim=True)
@@ -200,7 +222,8 @@ class KPlanesHybridOpacityDecoder(torch.nn.Module):
             torch.nn.ReLU(),
             torch.nn.Linear(64,1)
         )
-        self.activation = torch.nn.Softplus()
+        # self.activation = torch.nn.Softplus()
+        self.activation = lambda x: trunc_exp(x - 1.)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         return self.activation(self.net(features))

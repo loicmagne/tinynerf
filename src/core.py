@@ -93,7 +93,6 @@ class RayMarcherAABB():
         aabb_distances = self.aabb.unsqueeze(1) - rays_o
         aabb_intersections = aabb_distances / torch.where(rays_d == 0., rays_d + eps, rays_d)
         t_min = torch.amax(torch.amin(aabb_intersections, dim=0), dim=1)
-        t_max = torch.amin(torch.amax(aabb_intersections, dim=0), dim=1)
         t_min = torch.clamp(t_min, min=self.near, max=self.far) # !!!!!!!!!!!!
 
         # Compute samples along valid rays
@@ -110,7 +109,7 @@ RayMarcher = RayMarcherUnbounded | RayMarcherAABB
 class OccupancyGrid(torch.nn.Module):
     def __init__(
         self,
-        size: List[int] | int,
+        size: List[int] | int, # !!! size is [depth, height, width]
         step_size: float,
         threshold: float = 0.01,
         decay: float = 0.95,
@@ -119,30 +118,46 @@ class OccupancyGrid(torch.nn.Module):
         size = size if isinstance(size, List) else [size, size, size]
         self.decay = decay
         self.step_size = step_size
-        self.threshold = threshold
-    
+        self.base_threshold = threshold
+
         self.grid: torch.Tensor
-        self.register_buffer("grid", torch.zeros(size, dtype=torch.float))
+        self.register_buffer("grid", torch.ones(size, dtype=torch.float))
+        self.size = torch.tensor(size, dtype=torch.float)
+        self.mean = 1.
+
         self.coords = torch.stack(torch.meshgrid([
             torch.arange(size[0], dtype=torch.float),
             torch.arange(size[1], dtype=torch.float),
             torch.arange(size[2], dtype=torch.float)
         ], indexing="ij"), -1)
-        self.size = torch.tensor(size, dtype=torch.float)
-        self.mean = 1.
+        # since grid is stored in [depth, height, width] order, the real words coordinate corresponding
+        # the voxel addressed by grid[z,y,x] corresponds to coordinates [x,y,z], so we need to flip the coords
+        self.coords = torch.flip(self.coords, [-1])
 
     @torch.no_grad()
     def occupancy(self) -> float:
         return (self.grid > self.threshold).sum().item() / self.grid.numel()
+    
+    @property
+    def threshold(self) -> float:
+        return min(self.base_threshold, self.mean)
+
+    @property
+    def device(self) -> torch.device:
+        return self.grid.device
 
     @torch.no_grad()
     def update(self, sigma_fn: Callable[[torch.Tensor], torch.Tensor]):
         batch_shape = self.grid[0].size()
         for i in range(self.grid.size(0)):
             coords = -1. + 2. * (self.coords[i] + torch.rand_like(self.coords[i])) / self.size # jitter inside voxel 
-            coords = coords.view(-1, 3).contiguous().to(self.grid.device)
-            alpha = (1. - torch.exp(-sigma_fn(coords) * self.step_size)).view(batch_shape) # TODO: add step size
-            self.grid[i] = torch.maximum(self.grid[i] * self.decay, alpha)
+            coords = coords.view(-1, 3).to(self.device)
+            alpha = (1. - torch.exp(-sigma_fn(coords) * self.step_size)).view(batch_shape)
+            self.grid[i] = torch.where(
+                alpha > self.threshold,
+                torch.ones_like(alpha, device=self.device),
+                self.decay * self.grid[i]
+            )
         self.mean = self.grid.mean().item()
 
     @torch.no_grad()
@@ -150,16 +165,16 @@ class OccupancyGrid(torch.nn.Module):
         """"coords: [..., 3], normalized [-1,1] coordinates"""
         new_shape = coords.shape[:-1]
         values = torch.nn.functional.grid_sample(
-            # self.grid[None,None,...]
-            self.grid.unsqueeze(0).unsqueeze(0),
+            self.grid[None,None,...],
             coords.view(1,-1,1,1,3),
-            mode="bilinear", align_corners=False # TODO: align_corners=True?
+            mode="bilinear", align_corners=True # TODO: align_corners=True?
         ).view(new_shape).contiguous()
-        return values > min(self.threshold, self.mean)
+        return values > self.threshold
 
 @dataclass
 class RenderingStats:
     skipped_samples: List[float]
+    rendered_samples: int = 0
 
 class NerfRenderer(torch.nn.Module):
     def __init__(
@@ -212,8 +227,9 @@ class NerfRenderer(torch.nn.Module):
         samples_rgbs = torch.zeros(n_rays, n_samples, 3, device=device)
 
         # compute features and density for remaining samples
-        samples_features[mask] = self.feature_module(samples[mask])
-        samples_sigmas[mask] = self.sigma_decoder(samples_features[mask]).squeeze()
+        if mask.any():
+            samples_features[mask] = self.feature_module(samples[mask])
+            samples_sigmas[mask] = self.sigma_decoder(samples_features[mask]).squeeze()
 
         # compute transmittance and alpha
         alpha = - samples_sigmas * step_sizes # not actually alpha
@@ -224,12 +240,13 @@ class NerfRenderer(torch.nn.Module):
 
         mask = mask & (transmittance > early_termination_threshold)
         stats.skipped_samples.append(1. - mask.float().mean().item())
+        stats.rendered_samples = int(mask.sum().item())
 
-        # compute rgb for remaining samples
-        samples_rgbs[mask] = self.rgb_decoder(
-            samples_features[mask],
-            rays_d.unsqueeze(1).expand(-1,n_samples,-1)[mask] # give ray direction to rgb decoder
-        ) * weights[mask][:, None]
+        if mask.any(): # compute rgb for remaining samples
+            samples_rgbs[mask] = self.rgb_decoder(
+                samples_features[mask],
+                rays_d.unsqueeze(1).expand(-1,n_samples,-1)[mask] # give ray direction to rgb decoder
+            ) * weights[mask][:, None]
 
         rendered_rgb = samples_rgbs.sum(1) # accumulate rgb
 
