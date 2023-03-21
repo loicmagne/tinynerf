@@ -22,7 +22,6 @@ from dataclasses import dataclass
 from functools import cached_property
 import torch
 
-
 @dataclass
 class ContractionMip360():
     order : float | int = float('inf')
@@ -72,7 +71,6 @@ class RayMarcherUnbounded():
         step_sizes = torch.broadcast_to(step_sizes, (n_rays, self.n_samples))
         return t_values, step_sizes
 
-
 @dataclass
 class RayMarcherAABB():
     aabb: torch.Tensor
@@ -96,15 +94,13 @@ class RayMarcherAABB():
         t_min = torch.clamp(t_min, min=self.near, max=self.far) # !!!!!!!!!!!!
 
         # Compute samples along valid rays
-        step_size: float = torch.norm(self.aabb[1] - self.aabb[0]) / self.n_samples
-        steps = torch.arange(self.n_samples, dtype=torch.float, device=device) * step_size
+        steps = torch.arange(self.n_samples, dtype=torch.float, device=device) * self.step_size
         t_values = t_min[:, None] + steps
-        step_sizes = torch.full_like(t_values, step_size)
+        step_sizes = torch.full_like(t_values, self.step_size)
 
         return t_values, step_sizes
 
 RayMarcher = RayMarcherUnbounded | RayMarcherAABB
-
 
 class OccupancyGrid(torch.nn.Module):
     def __init__(

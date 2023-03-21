@@ -1,6 +1,7 @@
 import torch
 from src.models import VanillaFeatureMLP, VanillaOpacityDecoder, VanillaColorDecoder, PositionalEncoding
 from src.models import KPlanesFeatureField, KPlanesExplicitOpacityDecoder, KPlanesExplicitColorDecoder, KPlanesHybridColorDecoder, KPlanesHybridOpacityDecoder
+from src.models import CobafaFeatureField, CobafaOpacityDecoder, CobafaColorDecoder
 
 def test_vanilla_nerf():
     feature_mlp = VanillaFeatureMLP(10, [256 for k in range(8)])
@@ -66,3 +67,25 @@ def test_kplanes_hybrid():
     assert color.size() == (n_rays, 3)
     assert feature_field.loss_l1().item() >= 0.
     assert feature_field.loss_tv().item() >= 0.
+
+def test_cobafa():
+    feature_field = CobafaFeatureField(
+        basis_res=(torch.linspace(32., 128, 6)/1.).int().tolist(),
+        coef_res=128,
+        freqs=torch.linspace(2., 8., 6).tolist(),
+        channels=[4,4,4,2,2,2],
+        mlp_hidden_dim=128
+    )
+    opacity_decoder = CobafaOpacityDecoder(feature_field.feature_dim)
+    color_decoder = CobafaColorDecoder(6, feature_field.feature_dim, [128, 128])
+
+    n_rays = 100
+    rays_o = torch.rand(n_rays, 3)
+    rays_d = torch.rand(n_rays, 3)
+    features = feature_field(rays_o)
+    opacity = opacity_decoder(features)
+    color = color_decoder(features, rays_d)
+
+    assert features.size() == (n_rays, feature_field.feature_dim)
+    assert opacity.size() == (n_rays, 1)
+    assert color.size() == (n_rays, 3)

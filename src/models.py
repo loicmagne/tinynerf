@@ -66,7 +66,7 @@ class VanillaColorDecoder(torch.nn.Module):
     def __init__(self, n_freqs: int, in_features: int, hidden_features: List[int]):
         super().__init__()
         self.pe = PositionalEncoding(n_freqs)
-        self.total_features = in_features + n_freqs * 2 * 3
+        self.total_features = in_features + n_freqs * 2 * 3 + 3
         self.net = torch.nn.Sequential(
             torch.nn.Linear(self.total_features, hidden_features[0]),
             *[torch.nn.Sequential(
@@ -79,7 +79,7 @@ class VanillaColorDecoder(torch.nn.Module):
         )
 
     def forward(self, features: torch.Tensor, rays_d: torch.Tensor) -> torch.Tensor:
-        x = torch.cat([self.pe(rays_d), features], -1)
+        x = torch.cat([self.pe(rays_d), rays_d, features], -1)
         return self.net(x)
 
 """K-Planes https://arxiv.org/abs/2301.10241"""
@@ -244,3 +244,77 @@ class KPlanesHybridColorDecoder(torch.nn.Module):
     def forward(self, features: torch.Tensor, rays_d: torch.Tensor) -> torch.Tensor:
         x = torch.cat([self.pe(rays_d), rays_d, features], -1)
         return self.net(x)
+
+
+"""CoBaFa https://arxiv.org/abs/2302.01226"""
+
+class SawtoothEncoding(torch.nn.Module):
+    def __init__(self, f):
+        super().__init__()
+        self.f = f
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return 2. * ((self.f * x) % 1.) - 1. # also normalize to [-1, 1]
+
+class CobafaGrid(torch.nn.Module):
+    def __init__(
+        self,
+        res: int | Tuple[int,int,int],
+        feature_dim: int,
+        init: Callable = torch.nn.init.uniform_
+    ):
+        super().__init__()
+        resolution = (res, res, res) if isinstance(res, int) else res
+        self.grid = torch.nn.Parameter(torch.empty(1, feature_dim, *resolution))
+        self.feature_dim = feature_dim
+        init(self.grid)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (..., 3)"""
+        new_shape = [*x.size()[:-1], self.feature_dim]
+        output = torch.nn.functional.grid_sample(
+            self.grid,
+            x.view(1,-1,1,1,3),
+            align_corners=True 
+        ).squeeze().transpose(0,-1).contiguous()
+        return output.view(new_shape)
+
+class CobafaFeatureField(torch.nn.Module):
+    def __init__(
+        self,
+        basis_res: List[int | Tuple[int,int,int]],
+        coef_res: int | Tuple[int,int,int],
+        freqs: List[float],
+        channels: List[int],
+        mlp_hidden_dim: int
+    ):
+        super().__init__()
+        assert len(basis_res) == len(freqs) == len(channels)
+        L = len(basis_res)
+        self.basis_grids = torch.nn.ModuleList([CobafaGrid(res, c) for res, c in zip(basis_res, channels)])
+        self.encoders = torch.nn.ModuleList([SawtoothEncoding(f) for f in freqs])
+        self.coef_grid = CobafaGrid(coef_res, L)
+        self.mlp = torch.nn.Sequential(
+            torch.nn.Linear(sum(channels), mlp_hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(mlp_hidden_dim, mlp_hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(mlp_hidden_dim, mlp_hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(mlp_hidden_dim, mlp_hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(mlp_hidden_dim, mlp_hidden_dim),
+        )
+        self.feature_dim = mlp_hidden_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: [..., 3] normalized in [-1, 1]"""
+        coefs = self.coef_grid(x)
+        features = []
+        for i, (encoder, basis) in enumerate(zip(self.encoders, self.basis_grids)):
+            y = basis(encoder(x)) * coefs[:,[i]] # y: [..., channels[i]]
+            features.append(y)
+        return self.mlp(torch.cat(features, -1))
+
+# Just to stay consistent with other models
+CobafaOpacityDecoder = VanillaOpacityDecoder
+CobafaColorDecoder = VanillaColorDecoder 
