@@ -4,9 +4,9 @@ from src.models import KPlanesFeatureField, KPlanesExplicitOpacityDecoder, KPlan
 from src.models import CobafaFeatureField, CobafaOpacityDecoder, CobafaColorDecoder
 
 def test_vanilla_nerf():
-    feature_mlp = VanillaFeatureMLP(10, [256 for k in range(8)])
+    feature_mlp = VanillaFeatureMLP(10, 256, 8)
     opacity_decoder = VanillaOpacityDecoder(256)
-    color_decoder = VanillaColorDecoder(10, 256, [128])
+    color_decoder = VanillaColorDecoder(10, 256, 128, 1)
     
     rays_o = torch.rand(100, 3)
     rays_d = torch.rand(100, 3)
@@ -77,7 +77,7 @@ def test_cobafa():
         mlp_hidden_dim=128
     )
     opacity_decoder = CobafaOpacityDecoder(feature_field.feature_dim)
-    color_decoder = CobafaColorDecoder(6, feature_field.feature_dim, [128, 128])
+    color_decoder = CobafaColorDecoder(6, feature_field.feature_dim, 128, 2)
 
     n_rays = 100
     rays_o = torch.rand(n_rays, 3)

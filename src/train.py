@@ -67,10 +67,10 @@ def train_vanilla(cfg: VanillaTrainConfig):
     contraction: Contraction
 
     if cfg.method == 'vanilla':
-        feature_module = VanillaFeatureMLP(10, [256 for _ in range(8)])
+        feature_module = VanillaFeatureMLP(10, 256, 8)
         dim = feature_module.feature_dim
         sigma_decoder = VanillaOpacityDecoder(dim)
-        rgb_decoder = VanillaColorDecoder(4, dim, [128])
+        rgb_decoder = VanillaColorDecoder(4, dim, 128, 1)
     elif cfg.method == 'kplanes':
         feature_module = KPlanesFeatureField(32)
         dim = feature_module.feature_dim

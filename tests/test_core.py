@@ -39,7 +39,7 @@ def test_occupancy_grid():
  
 def test_occupancy_grid_update():
     # setup vanilla nerf
-    feature_mlp = VanillaFeatureMLP(10, [256 for k in range(8)])
+    feature_mlp = VanillaFeatureMLP(10, 256, 8)
     opacity_decoder = VanillaOpacityDecoder(256)
 
     def sigma_fn(t: torch.Tensor):
@@ -53,9 +53,9 @@ def test_occupancy_grid_update():
 
 def test_renderer_vanilla_nerf():
     # setup vanilla nerf
-    feature_mlp = VanillaFeatureMLP(10, [256 for k in range(8)])
+    feature_mlp = VanillaFeatureMLP(10, 256, 8)
     opacity_decoder = VanillaOpacityDecoder(256)
-    color_decoder = VanillaColorDecoder(4, 256, [128])
+    color_decoder = VanillaColorDecoder(4, 256, 128, 1)
     ray_marcher = RayMarcherUnbounded()
     contraction = ContractionMip360()
     
