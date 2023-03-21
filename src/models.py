@@ -4,10 +4,19 @@ from torch.autograd import Function
 from torch.cuda.amp import custom_fwd, custom_bwd # type: ignore
 from typing import List, Tuple, Callable, cast
 
+class PositionalEncoding(torch.nn.Module):
+    def __init__(self, n_freqs: int):
+        super().__init__()
+        self.freqs: torch.Tensor
+        self.register_buffer("freqs", 2**torch.arange(0, n_freqs) * torch.pi)
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x[...,None] * self.freqs
+        x = torch.cat([torch.sin(x), torch.cos(x)], -1)
+        return x.flatten(-2)
+
+# From https://github.com/ashawkey/torch-ngp/blob/93b08a0d4ec1cc6e69d85df7f0acdfb99603b628/activation.py
 class TruncatedExponential(Function):  # pylint: disable=abstract-method
-    # Implementation from torch-ngp:
-    # https://github.com/ashawkey/torch-ngp/blob/93b08a0d4ec1cc6e69d85df7f0acdfb99603b628/activation.py
     @staticmethod
     @custom_fwd(cast_inputs=torch.float32)
     def forward(ctx, x):  # pylint: disable=arguments-differ
@@ -20,22 +29,9 @@ class TruncatedExponential(Function):  # pylint: disable=abstract-method
         x = ctx.saved_tensors[0]
         return g * torch.exp(torch.clamp(x, min=-15, max=15))
 
-
-trunc_exp: Callable = TruncatedExponential.apply
-
+truncated_exp: Callable = TruncatedExponential.apply
 
 """Vanilla NeRF"""
-
-class PositionalEncoding(torch.nn.Module):
-    def __init__(self, n_freqs: int):
-        super().__init__()
-        self.freqs: torch.Tensor
-        self.register_buffer("freqs", 2**torch.arange(0, n_freqs) * torch.pi)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x[...,None] * self.freqs
-        x = torch.cat([torch.sin(x), torch.cos(x)], -1)
-        return x.flatten(-2)
 
 class VanillaFeatureMLP(torch.nn.Module):
     def __init__(self, n_freqs: int, hidden_features: List[int]):
@@ -106,10 +102,9 @@ class KPlanesFeaturePlane(torch.nn.Module):
         output = torch.nn.functional.grid_sample(
             self.plane,
             x.view(1,-1,1,2),
-            mode='bilinear',
             align_corners=True 
-        )
-        return output.squeeze().transpose(0,1).view(new_shape).contiguous()
+        ).squeeze().transpose(0,-1).contiguous()
+        return output.view(new_shape)
 
     def loss_tv(self) -> torch.Tensor:
         tv_x = torch.nn.functional.mse_loss(self.plane[:, :, 1:, :], self.plane[:, :, :-1, :])
@@ -183,8 +178,7 @@ class KPlanesExplicitOpacityDecoder(torch.nn.Module):
         self.net = torch.nn.Sequential(
             torch.nn.Linear(feature_dim, feature_dim),
         )
-        # self.activation = torch.nn.Softplus()
-        self.activation = lambda x: trunc_exp(x - 1.)
+        self.activation = lambda x: truncated_exp(x - 1.)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         x = torch.sum(features * self.net(features), -1, keepdim=True)
@@ -222,8 +216,7 @@ class KPlanesHybridOpacityDecoder(torch.nn.Module):
             torch.nn.ReLU(),
             torch.nn.Linear(64,1)
         )
-        # self.activation = torch.nn.Softplus()
-        self.activation = lambda x: trunc_exp(x - 1.)
+        self.activation = lambda x: truncated_exp(x - 1.)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         return self.activation(self.net(features))

@@ -167,13 +167,13 @@ class OccupancyGrid(torch.nn.Module):
         values = torch.nn.functional.grid_sample(
             self.grid[None,None,...],
             coords.view(1,-1,1,1,3),
-            mode="bilinear", align_corners=True # TODO: align_corners=True?
+            align_corners=True
         ).view(new_shape).contiguous()
         return values > self.threshold
 
 @dataclass
 class RenderingStats:
-    skipped_samples: List[float]
+    masked_ratio: float = 0.
     rendered_samples: int = 0
 
 class NerfRenderer(torch.nn.Module):
@@ -207,20 +207,15 @@ class NerfRenderer(torch.nn.Module):
         device = rays_o.device
         n_rays = rays_o.size(0)
         n_samples = self.ray_marcher.n_samples
-        stats = RenderingStats(skipped_samples=[])
+        stats = RenderingStats()
 
         # Generate samples along each ray
-        # TODO : precompute and store t_values
         t_values, step_sizes = self.ray_marcher(rays_o, rays_d)
         if self.training: # jitter samples along ray when training
-            t_values = t_values + torch.rand_like(t_values) * step_sizes # TODO: jittering can get samples out of AABB
+            t_values = t_values + torch.rand_like(t_values) * step_sizes
         samples = rays_o[:,None,:] + rays_d[:,None,:] * t_values[...,None]
-        samples, init_mask = self.contraction(samples)
-        mask = init_mask if init_mask is not None else torch.ones((n_rays,n_samples), dtype=torch.bool, device=device)
-        stats.skipped_samples.append(1. - mask.float().mean().item())
-
-        mask = mask & self.occupancy_grid(samples)
-        stats.skipped_samples.append(1. - mask.float().mean().item())
+        samples, marcher_mask = self.contraction(samples)
+        mask = self.occupancy_grid(samples) if marcher_mask is None else marcher_mask & self.occupancy_grid(samples)
 
         samples_features = torch.zeros(n_rays, n_samples, cast(int, self.feature_module.feature_dim), device=device)
         samples_sigmas = torch.zeros(n_rays, n_samples, device=device)
@@ -239,7 +234,7 @@ class NerfRenderer(torch.nn.Module):
         weights = transmittance * alpha
 
         mask = mask & (transmittance > early_termination_threshold)
-        stats.skipped_samples.append(1. - mask.float().mean().item())
+        stats.masked_ratio = 1. - mask.float().mean().item()
         stats.rendered_samples = int(mask.sum().item())
 
         if mask.any(): # compute rgb for remaining samples
