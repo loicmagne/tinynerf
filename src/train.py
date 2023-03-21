@@ -133,8 +133,8 @@ def train_vanilla(cfg: VanillaTrainConfig):
         renderer.eval()
         metrics_acc: List[TestMetrics] = []
         with torch.no_grad():
-            metrics = TestMetrics()
             for i in tqdm(indices):
+                metrics = TestMetrics()
                 data = img_dataset[i % len(img_dataset)]
                 img = data['rgbs']
                 rays_o = data['rays_o'].view(-1, 3)
@@ -152,7 +152,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
                     metrics.loss += torch.sum((batch_rendered_rgbs - batch_rgbs)**2).item()
                     rendered_rgbs.append(batch_rendered_rgbs.cpu())
                 rendered_img = torch.cat(rendered_rgbs, dim=0).view(img.shape)
-                metrics.psnr += psnr(img, rendered_img).item()
+                metrics.psnr = psnr(img, rendered_img).item()
                 metrics.loss /= rays_o.size(0)
                 metrics_acc.append(metrics)
 
