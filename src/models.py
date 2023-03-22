@@ -16,8 +16,12 @@ class MLP(torch.nn.Module):
         super().__init__()
         out_features = out_features if out_features is not None else hidden_features
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(in_features, hidden_features), activation(),
-            *[torch.nn.Sequential(torch.nn.Linear(hidden_features, hidden_features), activation()) for _ in range(hidden_layers)],
+            torch.nn.Linear(in_features, hidden_features),
+            activation(),
+            *[torch.nn.Sequential(
+                torch.nn.Linear(hidden_features, hidden_features),
+                activation()
+            ) for _ in range(hidden_layers)],
             torch.nn.Linear(hidden_features, out_features)
         )
     def forward(self, x: torch.Tensor):
@@ -58,45 +62,27 @@ class VanillaFeatureMLP(torch.nn.Module):
         in_features = n_freqs * 2 * 3
         self.encoding = PositionalEncoding(n_freqs=n_freqs)
         self.net = MLP(in_features, hidden_features, hidden_layers)
-        """self.net = torch.nn.Sequential(
-            PositionalEncoding(n_freqs),
-            torch.nn.Linear(in_features, hidden_features[0]),
-            *[torch.nn.Sequential(
-                torch.nn.ReLU(),
-                torch.nn.Linear(hidden_features[k], hidden_features[k+1]),
-            ) for k in range(len(hidden_features)-1)],
-        )"""
         self.feature_dim = hidden_features
 
     def forward(self, x):
         return self.net(self.encoding(x))
 
 class VanillaOpacityDecoder(torch.nn.Module):
-    def __init__(self, in_features: int):
+    def __init__(self, feature_dim):
         super().__init__()
-        self.net = torch.nn.Linear(in_features, 1)
+        self.net = MLP(feature_dim, 64, 0, 1)
         self.activation = lambda x: truncated_exp(x - 1.)
 
-    def forward(self, x):
-        return self.activation(self.net(x))
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.activation(self.net(features))
 
 class VanillaColorDecoder(torch.nn.Module):
     def __init__(self, n_freqs: int, in_features: int, hidden_features: int, hidden_layers: int):
         super().__init__()
         self.pe = PositionalEncoding(n_freqs)
-        self.total_features = in_features + n_freqs * 2 * 3 + 3
-        self.net = MLP(self.total_features, hidden_features, hidden_layers, 3)
+        total_features = in_features + n_freqs * 2 * 3 + 3
+        self.net = MLP(total_features, hidden_features, hidden_layers, 3)
         self.activation = torch.nn.Sigmoid()
-        """self.net = torch.nn.Sequential(
-            torch.nn.Linear(self.total_features, hidden_features[0]),
-            *[torch.nn.Sequential(
-                torch.nn.ReLU(),
-                torch.nn.Linear(hidden_features[k], hidden_features[k+1]),
-            ) for k in range(len(hidden_features)-1)],
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_features[-1], 3),
-            torch.nn.Sigmoid(),
-        )"""
 
     def forward(self, features: torch.Tensor, rays_d: torch.Tensor) -> torch.Tensor:
         x = torch.cat([self.pe(rays_d), rays_d, features], -1)
@@ -209,64 +195,12 @@ class KPlanesExplicitColorDecoder(torch.nn.Module):
         self.feature_dim = feature_dim
         in_dim = feature_dim + n_freqs * 2 * 3 + 3
         self.net = MLP(in_dim, hidden_dim, 3, 3 * feature_dim)
-        """self.net = torch.nn.Sequential(
-            torch.nn.Linear(in_dim, hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, 3 * feature_dim),
-        )"""
 
     def forward(self, features: torch.Tensor, rays_d: torch.Tensor) -> torch.Tensor:
         x = torch.cat([self.pe(rays_d), rays_d, features], -1)
         x = self.net(x).view(-1, 3, self.feature_dim)
         output = torch.sum(features.unsqueeze(-2) * x, -1)
         return torch.sigmoid(output)
-
-class KPlanesHybridOpacityDecoder(torch.nn.Module):
-    def __init__(self, feature_dim):
-        super().__init__()
-        self.net = MLP(feature_dim, 64, 0, 1)
-        """self.net = torch.nn.Sequential(
-            torch.nn.Linear(feature_dim, 64),
-            torch.nn.ReLU(),
-            torch.nn.Linear(64,1)
-        )"""
-        self.activation = lambda x: truncated_exp(x - 1.)
-
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        return self.activation(self.net(features))
-
-
-class KPlanesHybridColorDecoder(torch.nn.Module):
-    def __init__(self, feature_dim, n_freqs = 8, hidden_dim = 64):
-        super().__init__()
-        self.pe = PositionalEncoding(n_freqs)
-        self.feature_dim = feature_dim
-        in_dim = feature_dim + n_freqs * 2 * 3 + 3
-        self.net = MLP(in_dim, hidden_dim, 3, 3)
-        self.activation = torch.nn.Sigmoid()
-        """self.net = torch.nn.Sequential(
-            torch.nn.Linear(in_dim, hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, 3),
-            torch.nn.Sigmoid()
-        )"""
-
-    def forward(self, features: torch.Tensor, rays_d: torch.Tensor) -> torch.Tensor:
-        x = torch.cat([self.pe(rays_d), rays_d, features], -1)
-        return self.activation(self.net(x))
-
 
 """CoBaFa https://arxiv.org/abs/2302.01226"""
 
@@ -315,18 +249,8 @@ class CobafaFeatureField(torch.nn.Module):
         self.basis_grids = torch.nn.ModuleList([CobafaGrid(res, c) for res, c in zip(basis_res, channels)])
         self.encoders = torch.nn.ModuleList([SawtoothEncoding(f) for f in freqs])
         self.coef_grid = CobafaGrid(coef_res, L)
-        self.mlp = MLP(sum(channels), mlp_hidden_dim, 3)
-        """self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(sum(channels), mlp_hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(mlp_hidden_dim, mlp_hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(mlp_hidden_dim, mlp_hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(mlp_hidden_dim, mlp_hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(mlp_hidden_dim, mlp_hidden_dim),
-        )"""
+        self.dropout = torch.nn.Dropout(0.01)
+        self.mlp = MLP(sum(channels), mlp_hidden_dim, 5)
         self.feature_dim = mlp_hidden_dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -336,8 +260,5 @@ class CobafaFeatureField(torch.nn.Module):
         for i, (encoder, basis) in enumerate(zip(self.encoders, self.basis_grids)):
             y = basis(encoder(x)) * coefs[:,[i]] # y: [..., channels[i]]
             features.append(y)
-        return self.mlp(torch.cat(features, -1))
-
-# Just to stay consistent with other models
-CobafaOpacityDecoder = VanillaOpacityDecoder
-CobafaColorDecoder = VanillaColorDecoder 
+        features = self.dropout(torch.cat(features, -1))
+        return self.mlp(features)

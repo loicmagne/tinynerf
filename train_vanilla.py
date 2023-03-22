@@ -10,7 +10,7 @@ def get_config() -> VanillaTrainConfig:
     
     parser.add_argument('--data', type=str, required=True, help='path to the data folder')
     parser.add_argument('--output', type=str, required=True, help='path to the output folder')
-    parser.add_argument('--method', type=str, required=True, choices=['vanilla', 'kplanes'])
+    parser.add_argument('--method', type=str, required=True, choices=['vanilla', 'kplanes', 'cobafa'])
     parser.add_argument('--batch_size', type=int, default=2048)
     parser.add_argument('--n_samples', type=int, default=400, help='number of samples per ray')
     parser.add_argument('--eval_every', type=int, default=500, help='number of train steps between evaluations')

@@ -1,6 +1,6 @@
 from src.models import VanillaFeatureMLP, VanillaOpacityDecoder, VanillaColorDecoder
 from src.models import KPlanesFeatureField, KPlanesExplicitOpacityDecoder, KPlanesExplicitColorDecoder
-from src.models import KPlanesHybridOpacityDecoder, KPlanesHybridColorDecoder
+from src.models import CobafaFeatureField
 from src.data import ImagesDataset, RaysDataset
 from src.core import OccupancyGrid, NerfRenderer, RayMarcherAABB, RayMarcherUnbounded, ContractionAABB, ContractionMip360, RayMarcher, Contraction
 from dataclasses import dataclass, asdict
@@ -70,12 +70,23 @@ def train_vanilla(cfg: VanillaTrainConfig):
         feature_module = VanillaFeatureMLP(10, 256, 8)
         dim = feature_module.feature_dim
         sigma_decoder = VanillaOpacityDecoder(dim)
-        rgb_decoder = VanillaColorDecoder(4, dim, 128, 1)
+        rgb_decoder = VanillaColorDecoder(8, dim, 64, 3)
     elif cfg.method == 'kplanes':
         feature_module = KPlanesFeatureField(32)
         dim = feature_module.feature_dim
-        sigma_decoder = KPlanesHybridOpacityDecoder(dim)
-        rgb_decoder = KPlanesHybridColorDecoder(dim)
+        sigma_decoder = VanillaOpacityDecoder(dim)
+        rgb_decoder = VanillaColorDecoder(8, dim, 64, 3)
+    elif cfg.method == 'cobafa':
+        feature_module = CobafaFeatureField(
+            basis_res=torch.linspace(32., 128, 6).int().tolist(),
+            coef_res=128,
+            freqs=torch.linspace(2., 8., 6).tolist(),
+            channels=[8,8,8,4,4,4],
+            mlp_hidden_dim=128
+        )
+        dim = feature_module.feature_dim
+        sigma_decoder = VanillaOpacityDecoder(dim)
+        rgb_decoder = VanillaColorDecoder(8, dim, 64, 3)
     else:
         raise NotImplementedError(f'Unknown method {cfg.method}.')
     
@@ -105,6 +116,8 @@ def train_vanilla(cfg: VanillaTrainConfig):
         ray_marcher=ray_marcher,
         bg_color=cfg.train_rays.bg_color
     ).to(device)
+
+    print(f'Using {cfg.method} with {sum(p.numel() for p in renderer.parameters())} parameters.')    
 
     optimizer = torch.optim.Adam(
         renderer.parameters(),
