@@ -17,7 +17,7 @@ finally we compute rgbs for remaining samples, and we can accumulate to compute 
   allocating memory for samples which are discarded by the occupancy grid as done in nerfacc, but that is harder to work with triton
 """
 
-from typing import Callable, Tuple, List, cast
+from typing import Callable, Tuple, Iterator, Any, List, cast
 from dataclasses import dataclass
 from functools import cached_property
 import torch
@@ -167,77 +167,54 @@ class OccupancyGrid(torch.nn.Module):
         ).view(new_shape).contiguous()
         return values > self.threshold
 
-@dataclass
-class RenderingStats:
-    masked_ratio: float = 0.
-    rendered_samples: int = 0
-
 class NerfRenderer(torch.nn.Module):
     def __init__(
         self,
-        occupancy_grid: OccupancyGrid,
         feature_module: torch.nn.Module,
         sigma_decoder: torch.nn.Module,
         rgb_decoder: torch.nn.Module,
-        contraction: Contraction,
-        ray_marcher: RayMarcher,
         bg_color: torch.Tensor | None = None,
     ):
         super().__init__()
-        self.occupancy_grid = occupancy_grid
         self.feature_module = feature_module
         self.sigma_decoder = sigma_decoder
         self.rgb_decoder = rgb_decoder
-        self.contraction = contraction
-        self.ray_marcher = ray_marcher
         self.bg_color = bg_color
 
         assert hasattr(self.feature_module, "feature_dim"), "feature module requires a feature_dim attribute"
 
     def forward(
         self,
-        rays_o: torch.Tensor, # [n, 3]
-        rays_d: torch.Tensor, # [n, 3]
+        packed_o: torch.Tensor, # [n_samples, 3]
+        packed_d: torch.Tensor, # [n_samples, 3]
+        packing_info: torch.Tensor, # [n_rays, 2]
         early_termination_threshold: float = 1e-4,
-    ) -> Tuple[torch.Tensor, RenderingStats]:
-        device = rays_o.device
-        n_rays = rays_o.size(0)
-        n_samples = self.ray_marcher.n_samples
-        stats = RenderingStats()
+    ) -> torch.Tensor:
+        device = packed_o.device
 
-        # Generate samples along each ray
-        t_values, step_sizes = self.ray_marcher(rays_o, rays_d)
-        if self.training: # jitter samples along ray when training
-            t_values = t_values + torch.rand_like(t_values) * step_sizes
-        samples = rays_o[:,None,:] + rays_d[:,None,:] * t_values[...,None]
-        samples, marcher_mask = self.contraction(samples)
-        mask = self.occupancy_grid(samples) if marcher_mask is None else marcher_mask & self.occupancy_grid(samples)
+        samples_features = self.feature_module(packed_o)
+        samples_sigmas = self.sigma_decoder(samples_features).squeeze()
 
-        samples_features = torch.zeros(n_rays, n_samples, cast(int, self.feature_module.feature_dim), device=device)
-        samples_sigmas = torch.zeros(n_rays, n_samples, device=device)
-        samples_rgbs = torch.zeros(n_rays, n_samples, 3, device=device)
-
-        # compute features and density for remaining samples
-        if mask.any():
-            samples_features[mask] = self.feature_module(samples[mask])
-            samples_sigmas[mask] = self.sigma_decoder(samples_features[mask]).squeeze()
-
+        weights = render_weights(samples_sigmas, packed_steps, packing_info)
+        """
         # compute transmittance and alpha
         alpha = - samples_sigmas * step_sizes # not actually alpha
         transmittance = torch.exp(torch.cumsum(alpha, 1))[:, :-1]
         transmittance = torch.cat([torch.ones(n_rays,1).to(device), transmittance], dim=1) # shift transmittance to the right
         alpha = 1. - torch.exp(alpha)
         weights = transmittance * alpha
+        """
 
         mask = mask & (transmittance > early_termination_threshold)
-        stats.masked_ratio = 1. - mask.float().mean().item()
-        stats.rendered_samples = int(mask.sum().item())
 
         if mask.any(): # compute rgb for remaining samples
+            samples_rgbs = self.rgb_decoder(samples_features, packed_d)
+            """
             samples_rgbs[mask] = self.rgb_decoder(
                 samples_features[mask],
                 rays_d.unsqueeze(1).expand(-1,n_samples,-1)[mask] # give ray direction to rgb decoder
             ) * weights[mask][:, None]
+            """
 
         rendered_rgb = samples_rgbs.sum(1) # accumulate rgb
 
@@ -246,4 +223,30 @@ class NerfRenderer(torch.nn.Module):
             # TODO: learn a background color ?
             rendered_rgb = rendered_rgb + self.bg_color.to(device) * (1 - opacities)
 
-        return rendered_rgb, stats
+        return rendered_rgb
+
+@dataclass
+class RayProvider():
+    occupancy_grid: OccupancyGrid
+    contraction: Contraction
+    ray_marcher: RayMarcher
+
+    @torch.no_grad()
+    def __call__(self, rays_o: torch.Tensor, rays_d: torch.Tensor, training: bool):
+        # Generate a grid [n_rays, n_samples, 3] of samples
+        t_values, step_sizes = self.ray_marcher(rays_o, rays_d)
+        if training: # jitter samples along ray when training
+            t_values = t_values + torch.rand_like(t_values) * step_sizes
+        samples = rays_o[:,None,:] + rays_d[:,None,:] * t_values[...,None]
+        samples, marcher_mask = self.contraction(samples)
+        mask = self.occupancy_grid(samples) if marcher_mask is None else marcher_mask & self.occupancy_grid(samples)
+
+        # Pack the samples grid into 1D array, removing masked samples
+        rays_count = torch.sum(mask, dtype=torch.int32)
+        rays_start = torch.cumsum(rays_count, dim=0) - rays_count #!!!!
+        packing_info = torch.cat([rays_start, rays_count])
+        packed_d = torch.repeat_interleave(rays_d, rays_count)
+        packed_o = samples[mask]
+        packed_steps = step_sizes[mask]
+
+        return packed_o, packed_d, packed_steps, packing_info
