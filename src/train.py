@@ -206,7 +206,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
                         current_size += samples.size(0)
                         tmp_count += 1
                         # To know if we should run another iteration we add the average number of samples
-                        # generated from each batch to the current size
+                        # obtained in previous batch to the current size
                         projected_size = current_size * (1 + 1/tmp_count)
                     packed_samples = torch.cat(acc_samples, 0)
                     packed_rgbs = torch.cat(acc_rgbs, 0)
@@ -226,10 +226,6 @@ def train_vanilla(cfg: VanillaTrainConfig):
 
                 optimizer.zero_grad()
                 scaler.scale(loss).backward() # type: ignore
-
-                for name, param in renderer.named_parameters():
-                    print(f'{name}: {param.grad}')
-
                 optimizer.step()
                 scheduler.step()
 

@@ -11,19 +11,18 @@ __global__ void kernel_compute_weights_fwd(
     const int idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (idx > n_rays) return;
 
-    const int ray_start = info[2*idx];
     const int n_samples = info[2*idx+1];
+    const int ray_start = info[2*idx];
+    const int ray_end = ray_start + n_samples;
     if (n_samples == 0) return;
 
     float transmittance = 1.;
     float alpha;
-    int k = 0;
-    int _k;
+    int k = ray_start;
     // early terminate ray if transmittance under threshold
-    while (transmittance > threshold && k < n_samples) {
-        _k = ray_start+k;
-        alpha = expf(-sigmas[_k] * steps[_k]);
-        weights[_k] = transmittance * (1. - alpha);
+    while (transmittance > threshold && k < ray_end) {
+        alpha = __expf(- sigmas[k] * steps[k]);
+        weights[k] = transmittance * (1. - alpha);
         transmittance *= alpha;
         k++;
     }
@@ -42,20 +41,18 @@ __global__ void kernel_compute_weights_bwd(
     const int idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (idx > n_rays) return;
 
-    const int ray_start = info[2*idx];
     const int n_samples = info[2*idx+1];
+    const int ray_start = info[2*idx];
+    const int ray_end = ray_start + n_samples;
     if (n_samples == 0) return;
 
     float acc = 0.;
-    float alpha;
-    int k = n_samples - 1;
-    int _k;
-    while (k >= 0) {
-        _k = ray_start+k;
-        alpha = expf(-sigmas[_k] * steps[_k]);
-        grad_sigmas[_k] = steps[_k] * (acc + weights[_k] * alpha * grad_weights[_k] / (1. - alpha));
-        acc -= weights[_k] * grad_weights[_k];
-        k--;
+    float transmittance = 1.;
+    for(int k = ray_start; k < ray_end; k++) acc -= weights[k] * grad_weights[k];
+    for(int k = ray_start; k < ray_end; k++) {
+        acc += weights[k] * grad_weights[k];
+        transmittance *= __expf(-sigmas[k] * steps[k]);
+        grad_sigmas[k] = steps[k] * (acc + transmittance * grad_weights[k]);
     }
     return;
 }
@@ -131,7 +128,7 @@ torch::Tensor compute_weights_bwd(
         grad_sigmas.data_ptr<float>(),
         n_rays
     );
-    return sigmas;
+    return grad_sigmas;
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

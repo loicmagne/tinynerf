@@ -196,7 +196,7 @@ class RayProvider():
 
         # Pack the samples grid into 1D array, removing masked samples
         rays_count = torch.sum(mask, dim=-1, dtype=torch.int)
-        rays_start = torch.cumsum(rays_count, dim=0, dtype=torch.int) - rays_count #!!!!
+        rays_start = torch.cumsum(rays_count, dim=0, dtype=torch.int) - rays_count
         packing_info = torch.stack([rays_start, rays_count], -1)
 
         packed_d = torch.repeat_interleave(rays_d, rays_count, 0)
@@ -255,14 +255,14 @@ class NerfRenderer(torch.nn.Module):
         samples_sigmas = self.sigma_decoder(samples_features).squeeze()
 
         weights: torch.Tensor = NerfWeights.apply(samples_sigmas, packed_samples[:,6], packing_info, early_termination_threshold) # type: ignore
-        mask = weights > 0
+        mask = weights > 0.
 
         samples_rgbs = torch.zeros((n_samples,3), device=device)
         if mask.any(): # compute rgb for remaining samples
             samples_rgbs[mask] = self.rgb_decoder(samples_features[mask], packed_samples[:,3:6][mask])
-            samples_rgbs *= weights[:,None]
+            samples_rgbs = samples_rgbs * weights[:,None]
 
-        # TODO: triton kernel this
+        # TODO: cuda kernel this
         rendered_rgbs = torch.zeros((n_rays, 3), device=device)
         indices = torch.repeat_interleave(torch.arange(n_rays, device=device), packing_info[:,1])
         rendered_rgbs.index_add_(0, indices, samples_rgbs)
