@@ -13,7 +13,7 @@ def get_config() -> VanillaTrainConfig:
     parser.add_argument('--method', type=str, required=True, choices=['vanilla', 'kplanes', 'cobafa'])
     parser.add_argument('--batch_size', type=int, default=2048)
     parser.add_argument('--n_samples', type=int, default=400, help='number of samples per ray')
-    parser.add_argument('--eval_every', type=int, default=500, help='number of train steps between evaluations')
+    parser.add_argument('--eval_every', type=int, default=None, help='number of train steps between evaluations')
     parser.add_argument('--eval_n', type=int, default=1, help='number of images to evaluate on')
     parser.add_argument('--scene_type', type=str, default='aabb', choices=['aabb', 'unbounded'])
 

@@ -34,7 +34,7 @@ class VanillaTrainConfig:
     method: str
     batch_size: int
     n_samples: int
-    eval_every: int
+    eval_every: int | None
     eval_n : int
     scene_type: str
 
@@ -45,7 +45,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
     # Compute bunch of constant given we target 30k iter @ 4096 batch size
     bs_ratio = 4096 / cfg.batch_size
 
-    steps = int(30000 * bs_ratio)
+    steps = int(2048 * bs_ratio)
 
     occupancy_grid_updates = int(16 * bs_ratio)
     occupancy_grid_threshold = 0.01
@@ -184,8 +184,8 @@ def train_vanilla(cfg: VanillaTrainConfig):
             while True:
                 # Dynamically generate a batch of samples
                 with torch.no_grad():
-                    current_size = 0.
-                    projected_size = 0.
+                    current_size = 0
+                    projected_size = 0
                     tmp_count = 0
                     acc_info, acc_samples, acc_rgbs = [], [], []
                     while projected_size < target_sample_size:
@@ -199,6 +199,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
                         rgbs = data['rgbs'].to(device)
                         samples, info = ray_provider(rays_o, rays_d, training=True)
 
+                        info[:, 0] += current_size # offset the ray start position by the current number of samples
                         acc_info.append(info)
                         acc_samples.append(samples)
                         acc_rgbs.append(rgbs)
@@ -207,7 +208,8 @@ def train_vanilla(cfg: VanillaTrainConfig):
                         tmp_count += 1
                         # To know if we should run another iteration we add the average number of samples
                         # obtained in previous batch to the current size
-                        projected_size = current_size * (1 + 1/tmp_count)
+                        projected_size = int(current_size * (1 + 1/tmp_count))
+                        del rays_o; del rays_d; del rgbs; del info; del samples;
                     packed_samples = torch.cat(acc_samples, 0)
                     packed_rgbs = torch.cat(acc_rgbs, 0)
                     packing_info = torch.cat(acc_info, 0)
@@ -238,7 +240,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
                     rendered_samples=packed_samples.size(0) / target_sample_size
                 )
 
-                if train_step % cfg.eval_every == 0 and train_step > 0:
+                if cfg.eval_every is not None and train_step % cfg.eval_every == 0 and train_step > 0:
                     indices = list(range(test_step, test_step + cfg.eval_n))
                     metrics = eval_step(cfg.test_images, indices, f'test_{train_step}')
                     test_metrics.extend(metrics)
