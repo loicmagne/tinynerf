@@ -1,22 +1,3 @@
-""" 
-we start with a bunch of rays directions and origin of shape [n,3] for which we want to compute the color (i.e. sample along ray + accumulate)
-
-ray marching is simply performed by creating a linspace of timestamps t and adding t * rays_direction to rays_origin
-this yields a 2D grid [n, n_samples, 3] for which we can query occupancy grid, and discard samples accordingly
-Note: there is no discarding, that would create non rectangular shape, we only keep a mask
-
-we then compute some features for those samples, this gives a [n, n_samples, n_features] tensor
-
-those features are used to compute densities, with those densities we can compute transmittance to perform early ray termination
-
-finally we compute rgbs for remaining samples, and we can accumulate to compute original rgs
-
-+ this method reduces to almost the bare minimum the amount of queries to density and rgbs, and note that sample features and only computed once
-+ we always operate on a fixed dimension vector/grid so this should work with triton
-- this process consumes more memory than it should, since we over generate samples, if we were to generate samples along ray iteratively, we could avoid
-  allocating memory for samples which are discarded by the occupancy grid as done in nerfacc, but that is harder to work with triton
-"""
-
 from typing import Callable, Tuple, List, Any
 from dataclasses import dataclass
 from functools import cached_property
@@ -245,7 +226,7 @@ class NerfRenderer(torch.nn.Module):
         self,
         packed_samples: torch.Tensor, # [n_samples, 7]
         packing_info: torch.Tensor, # [n_rays, 2]
-        early_termination_threshold: float = 0., # TODO: add back 1e-4
+        early_termination_threshold: float = 1e-4,
     ) -> torch.Tensor:
         device = packed_samples.device
         n_samples = packed_samples.size(0)
