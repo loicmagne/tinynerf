@@ -9,7 +9,7 @@ __global__ void kernel_compute_weights_fwd(
     const int n_rays
 ) {
     const int idx = threadIdx.x + blockDim.x * blockIdx.x;
-    if (idx > n_rays) return;
+    if (idx >= n_rays) return;
 
     const int n_samples = info[2*idx+1];
     const int ray_start = info[2*idx];
@@ -39,7 +39,7 @@ __global__ void kernel_compute_weights_bwd(
     const int n_rays
 ) {
     const int idx = threadIdx.x + blockDim.x * blockIdx.x;
-    if (idx > n_rays) return;
+    if (idx >= n_rays) return;
 
     const int n_samples = info[2*idx+1];
     const int ray_start = info[2*idx];
