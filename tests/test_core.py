@@ -1,5 +1,5 @@
 import torch
-from src.core import OccupancyGrid, NerfRenderer, RayMarcherAABB, RayMarcherUnbounded, ContractionMip360, ContractionAABB
+from src.core import RayProvider, OccupancyGrid, NerfRenderer, RayMarcherAABB, RayMarcherUnbounded, ContractionMip360, ContractionAABB
 from src.models import VanillaFeatureMLP, VanillaOpacityDecoder, VanillaColorDecoder
 
 def test_occupancy_grid():
@@ -52,6 +52,7 @@ def test_occupancy_grid_update():
     assert occupancy_grid.grid.sum().item() <= occupancy_grid.grid.numel()
 
 def test_renderer_vanilla_nerf():
+    device = torch.device('cuda')
     # setup vanilla nerf
     feature_mlp = VanillaFeatureMLP(10, 256, 8)
     opacity_decoder = VanillaOpacityDecoder(256)
@@ -64,22 +65,26 @@ def test_renderer_vanilla_nerf():
         opacity = opacity_decoder(features)
         return opacity
 
-    occupancy_grid = OccupancyGrid(64, 1/1024.)
-    occupancy_grid.update(occupancy_fn)
+    occupancy_grid = OccupancyGrid(64, 1/1024.).to(device)
 
-    renderer  = NerfRenderer(
+    ray_provider = RayProvider(
         occupancy_grid=occupancy_grid,
-        feature_module=feature_mlp,
-        sigma_decoder=opacity_decoder,
-        rgb_decoder=color_decoder,
         contraction=contraction,
         ray_marcher=ray_marcher
     )
 
+    renderer  = NerfRenderer(
+        feature_module=feature_mlp,
+        sigma_decoder=opacity_decoder,
+        rgb_decoder=color_decoder,
+    ).to(device)
+
     rays_o = torch.rand(100, 3)
     rays_d = torch.rand(100, 3)
 
-    rendered_rgb, _ = renderer(rays_o, rays_d)
+    occupancy_grid.update(occupancy_fn)
+    packed_samples, packing_info = ray_provider(rays_o.to(device), rays_d.to(device), False)
+    rendered_rgb = renderer(packed_samples, packing_info)
 
     assert rendered_rgb.size() == (100, 3)
 
