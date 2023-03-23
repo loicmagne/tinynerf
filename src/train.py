@@ -59,7 +59,6 @@ def train_vanilla(cfg: VanillaTrainConfig):
     l1_reg_alpha = 1e-3
 
     train_loader = DataLoader(cfg.train_rays, cfg.batch_size, shuffle=True)
-    train_iter = iter(train_loader)
 
     feature_module: torch.nn.Module
     sigma_decoder: torch.nn.Module
@@ -106,7 +105,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
         step_size=ray_marcher.step_size,
         threshold=occupancy_grid_threshold,
         decay=occupancy_grid_decay
-    )
+    ).to(device)
 
     ray_provider = RayProvider(
         occupancy_grid=occupancy_grid,
@@ -115,23 +114,15 @@ def train_vanilla(cfg: VanillaTrainConfig):
     )
 
     renderer = NerfRenderer(
-        occupancy_grid=occupancy_grid,
         feature_module=feature_module,
         sigma_decoder=sigma_decoder,
         rgb_decoder=rgb_decoder,
-        contraction=contraction,
-        ray_marcher=ray_marcher,
         bg_color=cfg.train_rays.bg_color
     ).to(device)
 
     print(f'Using {cfg.method} with {sum(p.numel() for p in renderer.parameters())} parameters.')    
 
-    optimizer = torch.optim.Adam(
-        renderer.parameters(),
-        lr=lr_init,
-        eps=1e-15,
-        weight_decay=weight_decay
-    )
+    optimizer = torch.optim.Adam(renderer.parameters(), lr=lr_init, eps=1e-15, weight_decay=weight_decay)
 
     scheduler = torch.optim.lr_scheduler.ChainedScheduler([
         torch.optim.lr_scheduler.MultiStepLR(
@@ -167,8 +158,9 @@ def train_vanilla(cfg: VanillaTrainConfig):
                     batch_rays_o = rays_o[start:end].to(device)
                     batch_rays_d = rays_d[start:end].to(device)
                     batch_rgbs = rgbs[start:end].to(device)
+                    samples, info = ray_provider(batch_rays_o, batch_rays_d, training=False)
 
-                    batch_rendered_rgbs, _ = renderer(batch_rays_o, batch_rays_d)
+                    batch_rendered_rgbs = renderer(samples, info)
                     metrics.loss += torch.sum((batch_rendered_rgbs - batch_rgbs)**2).item()
                     rendered_rgbs.append(batch_rendered_rgbs.cpu())
                 rendered_img = torch.cat(rendered_rgbs, dim=0).view(img.shape)
@@ -182,10 +174,12 @@ def train_vanilla(cfg: VanillaTrainConfig):
         return metrics_acc
 
     def loop() -> Tuple[List[TrainMetrics], List[TestMetrics], List[TestMetrics]]:
+        train_iter = iter(train_loader)
         train_metrics: List[TrainMetrics] = []
         test_metrics: List[TestMetrics] = []
         train_step = 0
         test_step = 0
+        target_sample_size = cfg.batch_size * cfg.n_samples
         with tqdm(total=steps) as pbar:
             while True:
                 # Dynamically generate a batch of samples
@@ -193,8 +187,8 @@ def train_vanilla(cfg: VanillaTrainConfig):
                     current_size = 0.
                     projected_size = 0.
                     tmp_count = 0
-                    acc_info, acc_o, acc_d, acc_rgbs = [], [], [], []
-                    while projected_size < target_size:
+                    acc_info, acc_samples, acc_rgbs = [], [], []
+                    while projected_size < target_sample_size:
                         try:
                             data = next(train_iter)
                         except StopIteration:
@@ -203,18 +197,18 @@ def train_vanilla(cfg: VanillaTrainConfig):
                         rays_o = data['rays_o'].to(device)
                         rays_d = data['rays_d'].to(device)
                         rgbs = data['rgbs'].to(device)
-                        packed_data = ray_provider(rays_o, rays_d, training=True)
+                        samples, info = ray_provider(rays_o, rays_d, training=True)
 
-                        acc_o.append(packed_data[0])
-                        acc_d.append(packed_data[1])
-                        acc_info.append(packed_data[2])
+                        acc_info.append(info)
+                        acc_samples.append(samples)
                         acc_rgbs.append(rgbs)
 
-                        current_size += packed_data[0].size(0)
-                        projected_size = current_size * (1 + 1/tmp_count)
+                        current_size += samples.size(0)
                         tmp_count += 1
-                    packed_o = torch.cat(acc_o, 0)
-                    packed_d = torch.cat(acc_d, 0)
+                        # To know if we should run another iteration we add the average number of samples
+                        # generated from each batch to the current size
+                        projected_size = current_size * (1 + 1/tmp_count)
+                    packed_samples = torch.cat(acc_samples, 0)
                     packed_rgbs = torch.cat(acc_rgbs, 0)
                     packing_info = torch.cat(acc_info, 0)
 
@@ -223,7 +217,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
                 if train_step % occupancy_grid_updates == 0:
                     occupancy_grid.update(lambda t: renderer.sigma_decoder(renderer.feature_module(t)))
 
-                rendered_rgbs, stats = renderer(packed_o, packed_d, packing_info)
+                rendered_rgbs = renderer(packed_samples, packing_info)
                 loss = loss_fn(rendered_rgbs,packed_rgbs)
 
                 if cfg.method == 'kplanes':
@@ -232,6 +226,10 @@ def train_vanilla(cfg: VanillaTrainConfig):
 
                 optimizer.zero_grad()
                 scaler.scale(loss).backward() # type: ignore
+
+                for name, param in renderer.named_parameters():
+                    print(f'{name}: {param.grad}')
+
                 optimizer.step()
                 scheduler.step()
 
@@ -241,8 +239,7 @@ def train_vanilla(cfg: VanillaTrainConfig):
                 pbar.set_postfix(
                     loss=train_loss,
                     occupancy=occupancy,
-                    masked_ratio=stats.masked_ratio,
-                    rendered_samples= stats.rendered_samples
+                    rendered_samples=packed_samples.size(0) / target_sample_size
                 )
 
                 if train_step % cfg.eval_every == 0 and train_step > 0:
