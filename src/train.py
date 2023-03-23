@@ -2,7 +2,7 @@ from src.models import VanillaFeatureMLP, VanillaOpacityDecoder, VanillaColorDec
 from src.models import KPlanesFeatureField, KPlanesExplicitOpacityDecoder, KPlanesExplicitColorDecoder
 from src.models import CobafaFeatureField
 from src.data import ImagesDataset, RaysDataset
-from src.core import OccupancyGrid, NerfRenderer, RayMarcherAABB, RayMarcherUnbounded, ContractionAABB, ContractionMip360, RayMarcher, Contraction
+from src.core import OccupancyGrid, NerfRenderer, RayMarcherAABB, RayMarcherUnbounded, ContractionAABB, ContractionMip360, RayProvider, RayMarcher, Contraction
 from dataclasses import dataclass, asdict
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -34,7 +34,7 @@ class VanillaTrainConfig:
     method: str
     batch_size: int
     n_samples: int
-    eval_every: int
+    eval_every: int | None
     eval_n : int
     scene_type: str
 
@@ -45,13 +45,13 @@ def train_vanilla(cfg: VanillaTrainConfig):
     # Compute bunch of constant given we target 30k iter @ 4096 batch size
     bs_ratio = 4096 / cfg.batch_size
 
-    steps = int(30000 * bs_ratio)
+    steps = int(2048 * bs_ratio)
 
     occupancy_grid_updates = int(16 * bs_ratio)
     occupancy_grid_threshold = 0.01
     occupancy_res = 128
     # heuristic: a voxel must be queried 16 times empty to be considered empty
-    occupancy_grid_decay  = occupancy_grid_threshold ** (1 / 16)
+    occupancy_grid_decay = occupancy_grid_threshold ** (1 / 16)
 
     lr_init = 1e-2
     weight_decay = 1e-5
@@ -105,26 +105,24 @@ def train_vanilla(cfg: VanillaTrainConfig):
         step_size=ray_marcher.step_size,
         threshold=occupancy_grid_threshold,
         decay=occupancy_grid_decay
+    ).to(device)
+
+    ray_provider = RayProvider(
+        occupancy_grid=occupancy_grid,
+        contraction=contraction,
+        ray_marcher=ray_marcher
     )
 
     renderer = NerfRenderer(
-        occupancy_grid=occupancy_grid,
         feature_module=feature_module,
         sigma_decoder=sigma_decoder,
         rgb_decoder=rgb_decoder,
-        contraction=contraction,
-        ray_marcher=ray_marcher,
         bg_color=cfg.train_rays.bg_color
     ).to(device)
 
     print(f'Using {cfg.method} with {sum(p.numel() for p in renderer.parameters())} parameters.')    
 
-    optimizer = torch.optim.Adam(
-        renderer.parameters(),
-        lr=lr_init,
-        eps=1e-15,
-        weight_decay=weight_decay
-    )
+    optimizer = torch.optim.Adam(renderer.parameters(), lr=lr_init, eps=1e-15, weight_decay=weight_decay)
 
     scheduler = torch.optim.lr_scheduler.ChainedScheduler([
         torch.optim.lr_scheduler.MultiStepLR(
@@ -160,8 +158,9 @@ def train_vanilla(cfg: VanillaTrainConfig):
                     batch_rays_o = rays_o[start:end].to(device)
                     batch_rays_d = rays_d[start:end].to(device)
                     batch_rgbs = rgbs[start:end].to(device)
+                    samples, info = ray_provider(batch_rays_o, batch_rays_d, training=False)
 
-                    batch_rendered_rgbs, _ = renderer(batch_rays_o, batch_rays_d)
+                    batch_rendered_rgbs = renderer(samples, info)
                     metrics.loss += torch.sum((batch_rendered_rgbs - batch_rgbs)**2).item()
                     rendered_rgbs.append(batch_rendered_rgbs.cpu())
                 rendered_img = torch.cat(rendered_rgbs, dim=0).view(img.shape)
@@ -175,60 +174,88 @@ def train_vanilla(cfg: VanillaTrainConfig):
         return metrics_acc
 
     def loop() -> Tuple[List[TrainMetrics], List[TestMetrics], List[TestMetrics]]:
+        train_iter = iter(train_loader)
         train_metrics: List[TrainMetrics] = []
         test_metrics: List[TestMetrics] = []
         train_step = 0
         test_step = 0
+        target_sample_size = cfg.batch_size * cfg.n_samples
         with tqdm(total=steps) as pbar:
             while True:
-                for batch in train_loader:
-                    renderer.train()
+                # Dynamically generate a batch of samples
+                with torch.no_grad():
+                    current_size = 0
+                    projected_size = 0
+                    tmp_count = 0
+                    acc_info, acc_samples, acc_rgbs = [], [], []
+                    while projected_size < target_sample_size:
+                        try:
+                            data = next(train_iter)
+                        except StopIteration:
+                            train_iter = iter(train_loader)
+                            data = next(train_iter)
+                        rays_o = data['rays_o'].to(device)
+                        rays_d = data['rays_d'].to(device)
+                        rgbs = data['rgbs'].to(device)
+                        samples, info = ray_provider(rays_o, rays_d, training=True)
 
-                    if train_step % occupancy_grid_updates == 0:
-                        occupancy_grid.update(lambda t: renderer.sigma_decoder(renderer.feature_module(t)))
+                        info[:, 0] += current_size # offset the ray start position by the current number of samples
+                        acc_info.append(info)
+                        acc_samples.append(samples)
+                        acc_rgbs.append(rgbs)
 
-                    rays_o = batch['rays_o'].to(device)
-                    rays_d = batch['rays_d'].to(device)
-                    rgbs = batch['rgbs'].to(device)
+                        current_size += samples.size(0)
+                        tmp_count += 1
+                        # To know if we should run another iteration we add the average number of samples
+                        # obtained in previous batch to the current size
+                        projected_size = int(current_size * (1 + 1/tmp_count))
+                        del rays_o; del rays_d; del rgbs; del info; del samples;
+                    packed_samples = torch.cat(acc_samples, 0)
+                    packed_rgbs = torch.cat(acc_rgbs, 0)
+                    packing_info = torch.cat(acc_info, 0)
 
-                    rendered_rgbs, stats = renderer(rays_o, rays_d)
-                    loss = loss_fn(rendered_rgbs,rgbs)
+                renderer.train()
 
-                    if cfg.method == 'kplanes':
-                        loss += renderer.feature_module.loss_tv() * tv_reg_alpha # type: ignore
-                        loss += renderer.feature_module.loss_l1() * l1_reg_alpha # type: ignore
+                if train_step % occupancy_grid_updates == 0:
+                    occupancy_grid.update(lambda t: renderer.sigma_decoder(renderer.feature_module(t)))
 
-                    optimizer.zero_grad()
-                    scaler.scale(loss).backward() # type: ignore
-                    optimizer.step()
-                    scheduler.step()
+                rendered_rgbs = renderer(packed_samples, packing_info)
+                loss = loss_fn(rendered_rgbs,packed_rgbs)
 
-                    train_loss = loss.detach().cpu().item()
-                    occupancy = occupancy_grid.occupancy()
-                    train_metrics.append(TrainMetrics(train_loss, occupancy))
-                    pbar.set_postfix(
-                        loss=train_loss,
-                        occupancy=occupancy,
-                        masked_ratio=stats.masked_ratio,
-                        rendered_samples= stats.rendered_samples
-                    )
+                if cfg.method == 'kplanes':
+                    loss += renderer.feature_module.loss_tv() * tv_reg_alpha # type: ignore
+                    loss += renderer.feature_module.loss_l1() * l1_reg_alpha # type: ignore
 
-                    if train_step % cfg.eval_every == 0 and train_step > 0:
-                        indices = list(range(test_step, test_step + cfg.eval_n))
-                        metrics = eval_step(cfg.test_images, indices, f'test_{train_step}')
-                        test_metrics.extend(metrics)
-                        test_step += cfg.eval_n
+                optimizer.zero_grad()
+                scaler.scale(loss).backward() # type: ignore
+                optimizer.step()
+                scheduler.step()
 
-                    if train_step >= steps:
-                        # Evaluate on full test set
-                        indices = list(range(len(cfg.test_images)))
-                        final_metrics = eval_step(cfg.test_images, indices, f'test_full')
-                        # Save model
-                        torch.save(renderer.state_dict(), cfg.output / 'model.pt')
-                        return train_metrics, test_metrics, final_metrics
+                train_loss = loss.detach().cpu().item()
+                occupancy = occupancy_grid.occupancy()
+                train_metrics.append(TrainMetrics(train_loss, occupancy))
+                pbar.set_postfix(
+                    loss=train_loss,
+                    occupancy=occupancy,
+                    rendered_samples=packed_samples.size(0) / target_sample_size
+                )
 
-                    train_step += 1
-                    pbar.update(1)
+                if cfg.eval_every is not None and train_step % cfg.eval_every == 0 and train_step > 0:
+                    indices = list(range(test_step, test_step + cfg.eval_n))
+                    metrics = eval_step(cfg.test_images, indices, f'test_{train_step}')
+                    test_metrics.extend(metrics)
+                    test_step += cfg.eval_n
+
+                if train_step >= steps:
+                    # Evaluate on full test set
+                    indices = list(range(len(cfg.test_images)))
+                    final_metrics = eval_step(cfg.test_images, indices, f'test_full')
+                    # Save model
+                    torch.save(renderer.state_dict(), cfg.output / 'model.pt')
+                    return train_metrics, test_metrics, final_metrics
+
+                train_step += 1
+                pbar.update(1)
 
     train_metrics, test_metrics, final_metrics = loop()
     json.dump([asdict(x) for x in train_metrics], open(cfg.output / 'metrics_train.json', 'w'))

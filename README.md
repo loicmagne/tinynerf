@@ -1,23 +1,14 @@
 # tinynerf
 
-The goal of this repository is to maintain a concise, efficient and practical implementation of [NeRF](https://arxiv.org/abs/2003.08934). Currently it implements the factorized planes method from [K-Planes](https://arxiv.org/abs/2301.10241), accelerated using OpenAI [Triton](https://github.com/openai/triton) kernels.
-
-## Usage
-
-TODO
+Concise (<1000 locs) and fast implementation of several NeRF techniques. Currently it contains an implementation of vanilla [NeRF](https://arxiv.org/abs/2003.08934), [K-Planes](https://arxiv.org/abs/2301.10241) and [Cobafa](https://arxiv.org/abs/2302.01226), accelerated with a single CUDA kernel to compute the weights from 'NeRF equation'.
 
 ## Features
 
 - [ ] TODO
 
-## Triton
-
-TODO
-
-
 ## References
 
 These repositories were useful learning resources :
+- [https://github.com/KAIR-BAIR/nerfacc]()
 - [https://github.com/apchenstu/TensoRF]()
 - [https://github.com/sarafridov/K-Planes]()
-- [https://github.com/KAIR-BAIR/nerfacc]()
