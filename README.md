@@ -6,7 +6,15 @@ Concise (<1000 locs) and fast implementation of several NeRF techniques. Current
 
 ## Features
 
-- [ ] TODO
+- [x] Vanilla NeRF, K-Planes and Cobafa
+- [x] Occupancy grid to accelerate training (based on Instant-NGP but with slightly different decaying method)
+- [x] Unbounded and AABB scenes
+- [x] Dynamic batches, each iteration process a constant number of samples
+- [x] CUDA implementation of NeRF weights computation
+- [x] Reproduction of KPlanes results on synthetic dataset
+- [ ] Reproduction of Cobafa results on synthetic dataset
+- [ ] COLMAP data loading
+- [ ] Appearance embedding
 
 ## References
 
