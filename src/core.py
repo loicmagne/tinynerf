@@ -1,4 +1,4 @@
-from typing import Callable, Tuple, List, Any
+from typing import Callable, Tuple, List, Any, cast
 from dataclasses import dataclass
 from functools import cached_property
 from torch.utils.cpp_extension import load
@@ -232,16 +232,25 @@ class NerfRenderer(torch.nn.Module):
         n_samples = packed_samples.size(0)
         n_rays = packing_info.size(0)
 
-        samples_features = self.feature_module(packed_samples[:,:3])
-        samples_sigmas = self.sigma_decoder(samples_features).squeeze()
+        try:
+            if n_samples == 0:
+                raise ValueError('no samples remaining')
 
-        weights: torch.Tensor = NerfWeights.apply(samples_sigmas, packed_samples[:,6], packing_info, early_termination_threshold) # type: ignore
-        mask = weights > 0.
+            samples_features = self.feature_module(packed_samples[:,:3])
+            samples_sigmas = self.sigma_decoder(samples_features).ravel()
 
-        samples_rgbs = torch.zeros((n_samples,3), device=device)
-        if mask.any(): # compute rgb for remaining samples
+            weights: torch.Tensor = NerfWeights.apply(samples_sigmas, packed_samples[:,6], packing_info, early_termination_threshold) # type: ignore
+            mask = weights > 0.
+
+            if not mask.any():
+                raise ValueError('no samples remaining')
+
+            samples_rgbs = torch.zeros((n_samples,3), device=device)
             samples_rgbs[mask] = self.rgb_decoder(samples_features[mask], packed_samples[:,3:6][mask])
             samples_rgbs = samples_rgbs * weights[:,None]
+        except ValueError:
+            samples_rgbs = torch.zeros((n_samples,3), device=device)
+            weights = torch.zeros(n_samples, device=device)
 
         # TODO: cuda kernel this
         rendered_rgbs = torch.zeros((n_rays, 3), device=device)
