@@ -140,6 +140,7 @@ class KPlanesFeatureField(torch.nn.Module):
                 KPlanesFeaturePlane(feature_dim, resolution=(512,512)),
             ])
         ])
+        self.dropout = torch.nn.Dropout(0.05)
         # pairs of coordinates that will be used to compute plane feature *in that order*
         # check the order if you want to have specific resolution for a given dimension (e.g. t in the paper)
         self.dimension_pairs = list(itertools.combinations(range(3), 2))
@@ -158,7 +159,8 @@ class KPlanesFeatureField(torch.nn.Module):
             for (i, j), plane in zip(self.dimension_pairs, plane_scale): # type: ignore
                 current_scale_features *= plane(x[..., (i,j)])
             features.append(current_scale_features)
-        return torch.cat(features, -1) # type: ignore
+        output = self.dropout(torch.cat(features, -1)) # type: ignore
+        return output
 
     def loss_tv(self) -> torch.Tensor:
         loss = 0.
