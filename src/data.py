@@ -75,13 +75,17 @@ class NerfData:
     def scene_scale(self) -> float:
         return torch.max(torch.var(self.cameras[:, :3, 3], 0)).item()
 
-class ImagesDataset(Dataset):
+class PoseDataset(Dataset):
     def __init__(self, data: NerfData):
         # Note: h,w can be different for each image
         self.rays_o, self.rays_d = data.generate_rays() # [n_images][h, w, 3]
         self.rgbs = data.imgs # [n_images][h, w, 3], None when doing novel view synthesis
         self.scene_scale = data.scene_scale()
         self.bg_color = data.bg_color
+        self.intrinsics = data.intrinsics
+
+    def img_intrinsics(self, idx: int) -> Intrinsics:
+        return self.intrinsics if isinstance(self.intrinsics, Intrinsics) else self.intrinsics[idx]
 
     def __len__(self):
         return len(self.rays_o)
@@ -97,10 +101,11 @@ class ImagesDataset(Dataset):
 
 class RaysDataset(Dataset):
     def __init__(self, data: NerfData):
+        assert data.imgs is not None, "rays datasets requires rgbs"
         rays_o, rays_d = data.generate_rays()
         self.rays_o = torch.cat([t.view(-1, 3) for t in rays_o]) # [n_rays, 3]
         self.rays_d = torch.cat([t.view(-1, 3) for t in rays_d]) # [n_rays, 3]
-        self.rgbs = torch.cat([t.view(-1, 3) for t in data.imgs]) if data.imgs is not None else None # [n_rays, 3]
+        self.rgbs = torch.cat([t.view(-1, 3) for t in data.imgs]) # [n_rays, 3]
         self.scene_scale = data.scene_scale()
         self.bg_color = data.bg_color
 
@@ -108,14 +113,13 @@ class RaysDataset(Dataset):
         return self.rays_o.size(0)
 
     def __getitem__(self, idx):
-        data = {
+        return {
             "rays_o": self.rays_o[idx],
             "rays_d": self.rays_d[idx],
+            "rgbs" : self.rgbs[idx]
         }
-        if self.rgbs is not None:
-            data["rgbs"] = self.rgbs[idx]
-        return data
 
+# Data from https://www.matthewtancik.com/nerf
 def parse_nerf_synthetic(
     scene_path: Path,
     split: str = "train",
@@ -152,3 +156,12 @@ def parse_nerf_synthetic(
         intrinsics=intrinsics,
         bg_color=bg_color_tensor
     )
+
+# nerfstudio data format, use ns-process-data to generate data from images/videos
+# https://docs.nerf.studio/en/latest/quickstart/custom_dataset.html 
+def parse_nerfstudio(
+    scene_path: Path,
+    split: str = "train",
+    bg_color: Tuple[int,int,int] = (255, 255, 255)
+) -> NerfData:
+    raise NotImplementedError()

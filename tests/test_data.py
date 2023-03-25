@@ -1,13 +1,13 @@
 from typing import cast
 from pathlib import Path
-from src.data import parse_nerf_synthetic, RaysDataset, ImagesDataset
+from src.data import parse_nerf_synthetic, RaysDataset, PoseDataset
 from torch.utils.data import DataLoader
 import torch
 
 def test_synthetic_dataset():
     data = parse_nerf_synthetic(Path("tests/dummy/hotdog"), "train")
     ray_dataset = RaysDataset(data)
-    img_dataset = ImagesDataset(data)
+    img_dataset = PoseDataset(data)
 
     assert len(img_dataset.rays_d) == len(img_dataset.rays_o)
     assert img_dataset.rgbs is not None and len(img_dataset.rgbs) == len(img_dataset.rays_d)
