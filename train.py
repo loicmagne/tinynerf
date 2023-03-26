@@ -3,13 +3,13 @@ import argparse
 import uuid
 from pathlib import Path
 from src.run import train, TrainConfig
-from src.data import parse_nerf_synthetic, RaysDataset, PoseDataset
+from src.data import parse_nerf_synthetic, parse_nerfstudio, NerfData
 
 def get_config() -> TrainConfig:
     parser = argparse.ArgumentParser(prog='tinynerf', description='Train nerf')
     
     parser.add_argument('--data', type=str, required=True, help='path to the data folder')
-    parser.add_argument('--datatype', type=str, required=True, choices=['synthetic', 'nerfstudio'], default='nerfstudio')
+    parser.add_argument('--datatype', type=str, required=True, choices=['synthetic', 'real'], default='real')
     parser.add_argument('--output', type=str, required=True, help='path to the output folder')
     parser.add_argument('--scene_type', type=str, default='aabb', choices=['aabb', 'unbounded'])
 
@@ -23,18 +23,21 @@ def get_config() -> TrainConfig:
 
     args = parser.parse_args()
 
+    data_path = Path(args.data)
     if args.datatype == 'synthetic':
-        train_rays = RaysDataset(parse_nerf_synthetic(Path(args.data), 'train'))
-        eval_set = PoseDataset(parse_nerf_synthetic(Path(args.data), 'val'))
-        test_set = PoseDataset(parse_nerf_synthetic(Path(args.data), 'test'))
-    elif args.datatype == 'nerfstudio':
-        raise NotImplementedError()
+        train_rays = parse_nerf_synthetic(data_path, 'train')
+        eval_set = parse_nerf_synthetic(data_path, 'val')
+        test_set = parse_nerf_synthetic(data_path, 'test')
+    elif args.datatype == 'real':
+        train_rays = parse_nerfstudio(data_path)
+        eval_set = None
+        test_set = None
     else:
         raise NotImplementedError()
 
     return TrainConfig(
         method=args.method,
-        train_rays=train_rays,
+        train_set=train_rays,
         eval_set=eval_set,
         eval_every=args.eval_every,
         eval_n=args.eval_n,

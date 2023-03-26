@@ -156,7 +156,7 @@ class OccupancyGrid(torch.nn.Module):
         return values > self.threshold
 
 @dataclass
-class RayProvider():
+class SamplesProvider():
     occupancy_grid: OccupancyGrid
     contraction: Contraction
     ray_marcher: RayMarcher
@@ -186,6 +186,52 @@ class RayProvider():
         packed_samples = torch.cat([packed_o, packed_d, packed_steps[:,None]], -1)
 
         return packed_samples, packing_info
+
+def samples_generator(
+    rays_o: torch.Tensor,
+    rays_d: torch.Tensor,
+    rgbs: torch.Tensor | None,
+    provider: SamplesProvider,
+    target_size: int,
+    batch_size: int,
+    training: bool,
+    device: torch.device
+):
+    k = 0
+    n_rays = rays_o.size(0)
+    while k < n_rays:
+        count = 0
+        current_size = 0
+        projected_size = 0
+        acc_info, acc_samples, acc_rgbs = [], [], []
+        while projected_size < target_size and k < n_rays:
+            start = k
+            end = k + batch_size
+            o = rays_o[start:end].to(device)
+            d = rays_d[start:end].to(device)
+            samples, info = provider(o, d, training=training)
+
+            info[:, 0] += current_size # offset the ray start position by the current number of samples
+            acc_info.append(info)
+            acc_samples.append(samples)
+            if rgbs is not None:
+                acc_rgbs.append(rgbs[start:end].to(device))
+
+            count += 1
+            current_size += samples.size(0)
+            projected_size = int(current_size * (1. + 1./count))
+            k += batch_size
+
+        if current_size > 0:
+            packed_samples = torch.cat(acc_samples, 0)
+            packing_info = torch.cat(acc_info, 0)
+
+            if rgbs is not None:
+                packed_rgbs = torch.cat(acc_rgbs, 0)
+                yield packed_samples, packing_info, packed_rgbs
+            else:
+                yield packed_samples, packing_info, None
+
 
 """NEURAL RENDERING LOGIC: Ray rendering, Ray weights computation"""
 
