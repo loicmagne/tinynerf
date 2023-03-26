@@ -14,7 +14,7 @@ Concise (<1000 locs) and fast implementation of several NeRF techniques. Current
 - [x] Reproduction of KPlanes results on synthetic dataset
 - [ ] Reproduction of Cobafa results on synthetic dataset
 - [ ] Proposal sampling
-- [ ] COLMAP data loading
+- [x] COLMAP data loading
 - [ ] Appearance embedding
 
 ## References
