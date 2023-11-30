@@ -1,4 +1,4 @@
-from typing import Callable, Tuple, List, Any, cast
+from typing import Callable, Tuple, List, Any
 from dataclasses import dataclass
 from functools import cached_property
 from torch.utils.cpp_extension import load
@@ -249,8 +249,9 @@ class NerfRenderer(torch.nn.Module):
             samples_rgbs[mask] = self.rgb_decoder(samples_features[mask], packed_samples[:,3:6][mask])
             samples_rgbs = samples_rgbs * weights[:,None]
         except ValueError:
-            samples_rgbs = torch.zeros((n_samples,3), device=device)
-            weights = torch.zeros(n_samples, device=device)
+            print('Empty iteration, every sample is masked')
+            samples_rgbs = torch.zeros((n_samples,3), device=device, requires_grad=True)
+            weights = torch.zeros(n_samples, device=device, requires_grad=True)
 
         # TODO: cuda kernel this
         rendered_rgbs = torch.zeros((n_rays, 3), device=device)
