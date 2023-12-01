@@ -113,7 +113,13 @@ def train(cfg: TrainConfig):
     tv_reg_alpha = 0.0001
     l1_reg_alpha = 0.
 
-    train_loader = DataLoader(cfg.train_rays, cfg.batch_size, shuffle=True)
+    train_loader = DataLoader(
+        dataset=cfg.train_rays,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        pin_memory=True,
+        num_workers=8
+    )
 
     feature_module: torch.nn.Module
     sigma_decoder: torch.nn.Module
