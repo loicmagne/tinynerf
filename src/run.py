@@ -46,7 +46,7 @@ def infer(
             rendered.append(rendered_img.cpu().clone())
             # Save image
             rendered_img = (255. * rendered_img).type(torch.uint8).numpy()
-            Image.fromarray(rendered_img).save(folder / f'{name}_{i}.png')
+            Image.fromarray(rendered_img).save(folder / f'{name}_{i:04d}.png')
     return rendered
 
 
